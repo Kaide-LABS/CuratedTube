@@ -1,51 +1,64 @@
 # CuratedTube — Channel Roster Validation Report
 
-**Scope of this report:** the 4 channels added in commit `feat: add 4 channels …`.
-**Method:** channelIds were provided pre-verified (not re-resolved). `uploadsPlaylistId` derived
-`UC → UULF` (long-form only). UULF verified via the **zero-quota RSS feed**
-(`feeds/videos.xml?playlist_id=UULF…`) because no `YOUTUBE_API_KEY` is present in this environment;
-this confirms the playlist exists and returns long-form items. `title` read from the channel RSS feed.
+**Scope:** full canonical roster (root `channels.json`).
+**Method:** `resolve:true` handles resolved yt-dlp-first (0 quota) with a `channels.list?forHandle`
+fallback (1 unit); `uploadsPlaylistId` derived `UC → UULF` (long-form) and verified via the
+zero-quota RSS feed (`feeds/videos.xml?playlist_id=…`), falling back to `UU` when UULF is empty.
+Enrichment (`title`/`avatarUrl`/`subscriberCount`) via `channels.list?part=snippet,statistics`.
+Already-verified `UC…` ids were preserved byte-for-byte (never re-resolved). **No id was ever fabricated.**
 
-> **Quota used: 0 units.** No Data API calls (`playlistItems.list` / `channels.list`) were made —
-> RSS substituted for playlist verification. `playlistItems.list` verification and full
-> `channels.list` enrichment (avatar, subscriber count) remain pending an API key (see below).
+> **Approx. Data API quota used: 2 units.**
 
 ---
 
-## Additions (4)
+## Roster totals
 
-| Handle | channelId | uploadsPlaylistId (UULF) | Category | Tier | UULF status | Title (RSS) |
-|---|---|---|---|---|---|---|
-| @DarFawaaid | UCo_RPqYFFTaTl_0Ojg-e8Bg | UULFo_RPqYFFTaTl_0Ojg-e8Bg | Islamic | 1 | ✅ 200, ≥8 long-form items | Dar al-Fawāid |
-| @neurotrader888 | UCSh87zxGNu8q8iOInRK6E9w | UULFSh87zxGNu8q8iOInRK6E9w | Finance-Quant | 2 | ✅ 200, ≥15 long-form items | neurotrader |
-| @JefBayless | UClClejjYjZyO38piuXhAFZw | UULFlClejjYjZyO38piuXhAFZw | Sports | 3 | ✅ 200, ≥15 long-form items | Jef |
-| @actuallycarterpcs | UCi7wDE2ZTiR5QYYrUY5WhtA | UULFi7wDE2ZTiR5QYYrUY5WhtA | Coding-Tech | 3 | ✅ 200, ≥15 long-form items | CarterPCs |
+| Metric | Count |
+|---|---|
+| Total entries | 89 |
+| Resolved (real UC… id) | 89 |
+| UNRESOLVED (resolution failed) | 0 |
+| Tier 1 (Beneficial) | 21 |
+| Tier 2 (Educational) | 50 |
+| Tier 3 (Entertainment, channel-page only) | 14 |
+| Parked (tier null) | 4 |
+| UULF → UU fallbacks | 0 |
+| Shorts-only / empty | 0 |
+| Needs human confirm | 17 |
 
-> RSS returns at most 15 entries, so "≥15" means the feed was full — the playlist has at least that
-> many long-form videos. None fell back to `UU`; no `/shorts/` filtering required.
+## UNRESOLVED (no id fabricated — fix the handle or remove)
+_none_
 
-## Flags
+## Parked (tier: null — resolved/stored but excluded from all feeds until classified)
+- `@monium` (UCxULzGyhtIUotnMIM4G4-rw)
+- `@Tomographic` (UCOt5hVyS2-nbcJ3_FP41Ajg)
+- `@LitNomad` (UCjbUKFFbH0JYU94ONGDeM-A)
+- `@leonjhendrix` (UCTvRcHO5jJ_JKcekLacLMuQ)
 
-- **@actuallycarterpcs (SPECIAL — Shorts-first, "4× a day"):** the long-form **UULF feed is NOT
-  sparse** — it returned a full page (≥15 long-form items), so UULF correctly isolates this
-  channel's long-form output and excludes its Shorts at the data layer. **Not a removal candidate
-  on UULF grounds.** It still carries `confirm: true` — **tier (currently 3) is pending human
-  review**, unchanged by this verification. A precise long-form count needs `playlistItems.list`
-  (pending key); RSS already proves it is well above "near-empty."
-- **No UNRESOLVED entries** in this batch (all 4 channelIds were provided and verified).
-- **No dead / renamed channels** detected (all RSS endpoints returned HTTP 200).
-- **No UULF → UU fallbacks** used.
-- **No Shorts-only / empty** channels in this batch.
-- **No duplicates** introduced (handles/channelIds not already present in the roster).
+## Shorts-only / empty (excluded from active feed)
+_none_
 
-## Pending (blocked on `YOUTUBE_API_KEY`)
+## UULF → UU fallbacks used
+_none_
 
-- `avatarUrl` and `subscriberCount` for all 4 — require `channels.list?part=snippet,statistics`.
-  **Not fabricated.** Run the enrichment step once a key is set:
-  `YOUTUBE_API_KEY=… npm run resolve-channels` (enrich pass).
-- `playlistItems.list` exact long-form item counts (RSS gives presence + a 15-item ceiling only).
+## Needs human confirmation (tier/category)
+- `@muhasisay9712` — category "Islamic", tier 1
+- `@VoicesForGaza` — category "Islamic/Cause", tier 1
+- `@monium` — category "UNCONFIRMED", tier null
+- `@memlabs-research` — category "AI-ML", tier 2
+- `@SamuelBoschMIT` — category "AI-ML", tier 2
+- `@borismeinardus` — category "AI-ML/Career", tier 2
+- `@HybridCalisthenics` — category "Fitness", tier 2
+- `@NoelDeyzel` — category "Fitness", tier 2
+- `@SchoolOfScent` — category "Hobby-Fragrance", tier 2
+- `@DocuDubery` — category "Documentary", tier 2
+- `@Tomographic` — category "UNCONFIRMED", tier null
+- `@LitNomad` — category "UNCONFIRMED", tier null
+- `@zephfire_16` — category "Entertainment", tier 3
+- `@Saintdon1` — category "Entertainment", tier 3
+- `@ChrisKohlerNews` — category "Gaming-News", tier 3
+- `@leonjhendrix` — category "UNCONFIRMED", tier null
+- `@actuallycarterpcs` — category "Coding-Tech", tier 3
 
-## Roster meta
-
-- `_meta.verifiedCount`: **27 → 31**.
-- Total entries in `channels[]`: **88** (84 prior + 4 added).
+## Duplicates
+_none_

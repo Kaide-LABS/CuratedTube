@@ -4,7 +4,7 @@
 
 import "server-only";
 import { cache } from "react";
-import { getChannels, getChannelConfig, resolveUploadsPlaylistId } from "./channels";
+import { getActiveByTier, getChannelConfig, resolveUploadsPlaylistId } from "./channels";
 import { pollUploads } from "./rss";
 import {
   enrichWithAvatars,
@@ -28,7 +28,9 @@ export type HomeFeed = {
 
 /** Home Focus Feed: RSS-detect recent uploads across all channels -> enrich -> balance. */
 export const getHomeFeed = cache(async (): Promise<HomeFeed> => {
-  const channels = getChannels();
+  // Tier model (PRD §2): home draws from Tier 1 ∪ Tier 2 ONLY. Tier 3 (Entertainment) and
+  // parked channels are excluded at the source, so no Tier-3 video can enter the home pool.
+  const channels = [...getActiveByTier(1), ...getActiveByTier(2)];
   if (!hasApiKey()) return { ready: false, reason: "no-api-key", videos: [] };
   if (channels.length === 0) return { ready: false, reason: "no-channels", videos: [] };
 

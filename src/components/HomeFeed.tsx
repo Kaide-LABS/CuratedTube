@@ -2,9 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { Video } from "@/lib/types";
-import { CATEGORIES } from "@/lib/types";
-import { getChannels } from "@/lib/channels";
-import { buildUnifiedFeed, sortVideos, HOME_FEED_CAP } from "@/lib/feed";
+import { buildHomeFeed, sortVideos, HOME_FEED_CAP } from "@/lib/feed";
 import { getVisitedSet } from "@/lib/watchState";
 import { CategoryFilterBar, type CategoryOption } from "./CategoryFilterBar";
 import { VideoPreviewCard } from "./VideoPreviewCard";
@@ -13,9 +11,9 @@ import { CaughtUpBlocker } from "./CaughtUpBlocker";
 const STORAGE_KEY = "ct:home:category";
 
 export function HomeFeed({ pool }: { pool: Video[] }) {
-  const channels = useMemo(() => getChannels(), []);
+  // Distinct categories present in the (Tier 1∪2) pool, for the filter pills.
   const options = useMemo<CategoryOption[]>(() => {
-    const present = CATEGORIES.filter((c) => pool.some((v) => v.category === c));
+    const present = [...new Set(pool.map((v) => v.category))].filter(Boolean).sort();
     return ["All", ...present];
   }, [pool]);
 
@@ -44,14 +42,14 @@ export function HomeFeed({ pool }: { pool: Video[] }) {
     };
   }, []);
 
-  // "All" -> category-balanced 24. A specific category -> its newest 24.
+  // "All" -> tier-weighted 24 (15 Tier 1 / 9 Tier 2 / 0 Tier 3). A specific category -> its newest 24.
   const view = useMemo(() => {
-    if (selected === "All") return buildUnifiedFeed(pool, channels, HOME_FEED_CAP);
+    if (selected === "All") return buildHomeFeed(pool);
     return sortVideos(
       pool.filter((v) => v.category === selected),
       "latest",
     ).slice(0, HOME_FEED_CAP);
-  }, [pool, channels, selected]);
+  }, [pool, selected]);
 
   return (
     <div className="px-4 py-6">

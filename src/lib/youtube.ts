@@ -11,9 +11,10 @@
 // window defaults to the RSS poll cadence (30 min) and is configurable via env.
 
 import "server-only";
+import { z } from "zod";
 import { recordQuota } from "./quota";
-import type { Category, ChannelMeta, Video } from "./types";
-import { getCategoryOf, USE_UULF } from "./channels";
+import { VideoSchema, type Category, type ChannelMeta, type Tier, type Video } from "./types";
+import { getCategoryOf, getTierOf, USE_UULF } from "./channels";
 
 const API_BASE = "https://www.googleapis.com/youtube/v3";
 
@@ -41,7 +42,15 @@ function revalidateSeconds(): number {
   return Number.isFinite(v) && v > 0 ? v : 1800;
 }
 
-async function apiGet<T>(path: string, params: Record<string, string>): Promise<T> {
+// Deterministic validation boundary: every Data API response is parsed with a Zod schema
+// before any field is read. A shape that doesn't match the documented response fails here
+// rather than producing silent `undefined`s downstream. Unknown keys are tolerated (the API
+// returns far more than we read); the fields we consume are validated.
+async function apiGet<T>(
+  path: string,
+  params: Record<string, string>,
+  schema: z.ZodType<T>,
+): Promise<T> {
   const url = new URL(`${API_BASE}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set("key", apiKey());
@@ -51,7 +60,7 @@ async function apiGet<T>(path: string, params: Record<string, string>): Promise<
     const body = await res.text().catch(() => "");
     throw new Error(`YouTube API ${path} ${res.status}: ${body.slice(0, 300)}`);
   }
-  return (await res.json()) as T;
+  return schema.parse(await res.json());
 }
 
 // ---------------------------------------------------------------------------
@@ -75,51 +84,80 @@ export function isShort(durationSec: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// YouTube API response shapes (only the fields we read).
+// YouTube API response schemas (only the fields we read; unknown keys tolerated).
+// These are the deterministic validation boundary for the Data API.
 // ---------------------------------------------------------------------------
-type PlaylistItemsResponse = {
-  nextPageToken?: string;
-  items: Array<{
-    snippet?: {
-      title: string;
-      publishedAt: string;
-      channelId: string;
-      channelTitle: string;
-      resourceId?: { videoId: string };
-      thumbnails?: Record<string, { url: string }>;
-    };
-    contentDetails?: { videoId: string; videoPublishedAt?: string };
-  }>;
-};
+const ThumbnailsSchema = z.record(z.object({ url: z.string() })).optional();
 
-type VideosResponse = {
-  items: Array<{
-    id: string;
-    snippet?: {
-      title: string;
-      publishedAt: string;
-      channelId: string;
-      channelTitle: string;
-      thumbnails?: Record<string, { url: string }>;
-    };
-    statistics?: { viewCount?: string; likeCount?: string };
-    contentDetails?: { duration?: string };
-  }>;
-};
+const PlaylistItemsResponseSchema = z.object({
+  nextPageToken: z.string().optional(),
+  items: z.array(
+    z.object({
+      snippet: z
+        .object({
+          title: z.string().optional(),
+          publishedAt: z.string().optional(),
+          channelId: z.string().optional(),
+          channelTitle: z.string().optional(),
+          resourceId: z.object({ videoId: z.string().optional() }).optional(),
+          thumbnails: ThumbnailsSchema,
+        })
+        .optional(),
+      contentDetails: z
+        .object({ videoId: z.string().optional(), videoPublishedAt: z.string().optional() })
+        .optional(),
+    }),
+  ),
+});
+type PlaylistItemsResponse = z.infer<typeof PlaylistItemsResponseSchema>;
 
-type ChannelsResponse = {
-  items: Array<{
-    id: string;
-    snippet?: {
-      title: string;
-      description: string;
-      customUrl?: string;
-      thumbnails?: Record<string, { url: string }>;
-    };
-    statistics?: { subscriberCount?: string; hiddenSubscriberCount?: boolean };
-    brandingSettings?: { image?: { bannerExternalUrl?: string } };
-  }>;
-};
+const VideosResponseSchema = z.object({
+  items: z.array(
+    z.object({
+      id: z.string(),
+      snippet: z
+        .object({
+          title: z.string().optional(),
+          publishedAt: z.string().optional(),
+          channelId: z.string().optional(),
+          channelTitle: z.string().optional(),
+          thumbnails: ThumbnailsSchema,
+        })
+        .optional(),
+      statistics: z
+        .object({ viewCount: z.string().optional(), likeCount: z.string().optional() })
+        .optional(),
+      contentDetails: z.object({ duration: z.string().optional() }).optional(),
+    }),
+  ),
+});
+type VideosResponse = z.infer<typeof VideosResponseSchema>;
+
+const ChannelsResponseSchema = z.object({
+  items: z.array(
+    z.object({
+      id: z.string(),
+      snippet: z
+        .object({
+          title: z.string().optional(),
+          description: z.string().optional(),
+          customUrl: z.string().optional(),
+          thumbnails: ThumbnailsSchema,
+        })
+        .optional(),
+      statistics: z
+        .object({
+          subscriberCount: z.string().optional(),
+          hiddenSubscriberCount: z.boolean().optional(),
+        })
+        .optional(),
+      brandingSettings: z
+        .object({ image: z.object({ bannerExternalUrl: z.string().optional() }).optional() })
+        .optional(),
+    }),
+  ),
+});
+type ChannelsResponse = z.infer<typeof ChannelsResponseSchema>;
 
 function bestThumb(thumbs?: Record<string, { url: string }>): string {
   if (!thumbs) return "";
@@ -155,7 +193,11 @@ export async function getUploads(
       maxResults: String(pageSize),
     };
     if (pageToken) params.pageToken = pageToken;
-    const data = await apiGet<PlaylistItemsResponse>("playlistItems", params);
+    const data = await apiGet<PlaylistItemsResponse>(
+      "playlistItems",
+      params,
+      PlaylistItemsResponseSchema,
+    );
     recordQuota("playlistItems.list");
     for (const it of data.items) {
       const videoId = it.contentDetails?.videoId;
@@ -180,30 +222,40 @@ export async function enrich(videoIds: string[]): Promise<Video[]> {
   for (let i = 0; i < videoIds.length; i += 50) {
     const batch = videoIds.slice(i, i + 50);
     if (batch.length === 0) continue;
-    const data = await apiGet<VideosResponse>("videos", {
-      part: "snippet,statistics,contentDetails",
-      id: batch.join(","),
-      maxResults: "50",
-    });
+    const data = await apiGet<VideosResponse>(
+      "videos",
+      {
+        part: "snippet,statistics,contentDetails",
+        id: batch.join(","),
+        maxResults: "50",
+      },
+      VideosResponseSchema,
+    );
     recordQuota("videos.list");
     for (const v of data.items) {
       const durationSec = parseISODuration(v.contentDetails?.duration || "");
       // UU fallback: drop Shorts client-side when not already excluded by UULF.
       if (!USE_UULF && isShort(durationSec)) continue;
-      const category: Category = getCategoryOf(v.snippet?.channelId || "") ?? "AI-Tech";
-      out.push({
-        videoId: v.id,
-        channelId: v.snippet?.channelId || "",
-        channelTitle: v.snippet?.channelTitle || "",
-        channelAvatarUrl: "", // filled by callers that join channel meta
-        title: v.snippet?.title || "",
-        thumbnailUrl: bestThumb(v.snippet?.thumbnails),
-        durationSec,
-        viewCount: Number(v.statistics?.viewCount || 0),
-        likeCount: Number(v.statistics?.likeCount || 0),
-        publishedAt: v.snippet?.publishedAt || "",
-        category,
-      });
+      const channelId = v.snippet?.channelId || "";
+      // Category + tier are carried from the roster config (tier drives home composition).
+      const category: Category = getCategoryOf(channelId) ?? "";
+      const tier: Tier = getTierOf(channelId) ?? null;
+      out.push(
+        VideoSchema.parse({
+          videoId: v.id,
+          channelId,
+          channelTitle: v.snippet?.channelTitle || "",
+          channelAvatarUrl: "", // filled by callers that join channel meta
+          title: v.snippet?.title || "",
+          thumbnailUrl: bestThumb(v.snippet?.thumbnails),
+          durationSec,
+          viewCount: Number(v.statistics?.viewCount || 0),
+          likeCount: Number(v.statistics?.likeCount || 0),
+          publishedAt: v.snippet?.publishedAt || "",
+          category,
+          tier,
+        }),
+      );
     }
   }
   return out;
@@ -217,11 +269,15 @@ export async function getChannelMeta(channelIds: string[]): Promise<ChannelMeta[
   for (let i = 0; i < channelIds.length; i += 50) {
     const batch = channelIds.slice(i, i + 50);
     if (batch.length === 0) continue;
-    const data = await apiGet<ChannelsResponse>("channels", {
-      part: "snippet,statistics,brandingSettings",
-      id: batch.join(","),
-      maxResults: "50",
-    });
+    const data = await apiGet<ChannelsResponse>(
+      "channels",
+      {
+        part: "snippet,statistics,brandingSettings",
+        id: batch.join(","),
+        maxResults: "50",
+      },
+      ChannelsResponseSchema,
+    );
     recordQuota("channels.list");
     for (const c of data.items) {
       out.push({
@@ -233,7 +289,8 @@ export async function getChannelMeta(channelIds: string[]): Promise<ChannelMeta[
         subscriberCount: Number(c.statistics?.subscriberCount || 0),
         hiddenSubscriberCount: Boolean(c.statistics?.hiddenSubscriberCount),
         description: c.snippet?.description || "",
-        category: getCategoryOf(c.id) ?? "AI-Tech",
+        category: getCategoryOf(c.id) ?? "",
+        tier: getTierOf(c.id) ?? null,
       });
     }
   }
