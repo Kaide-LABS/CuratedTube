@@ -92,6 +92,50 @@ export const WatchStateSchema = z.object({
 });
 export type WatchState = z.infer<typeof WatchStateSchema>;
 
+// --- Focus Feed ranking (PHASE_2_SPEC §3) ---------------------------------
+// Tunable weights/windows for the home ranker. Validated so a malformed override
+// (e.g. a negative gravity) fails loudly rather than producing a silent NaN score.
+export const RankingConfigSchema = z.object({
+  model: z.enum(["s1", "s2"]).default("s1"), // S₁ gravity (default) | S₂ linear (flagged)
+  // S₁ params
+  popularityExponent: z.number().positive().default(0.8), // a (V^a, a<1 dampens mega-views)
+  gravity: z.number().positive().default(1.5), // g ((T+2)^g)
+  seenFactor: z.number().min(0).max(1).default(0.05), // P_seen for watched videos
+  // S₂ params (read only when model === "s2")
+  wPop: z.number().default(0.35),
+  wFresh: z.number().default(0.4),
+  wUnwatched: z.number().default(0.2),
+  wSeen: z.number().default(0.3),
+  decayKind: z.enum(["exp", "reciprocal"]).default("exp"), // exp(−λT) | 1/(1+T/τ)
+  lambda: z.number().positive().default(0.0125), // per-hour; ~half-life 55h
+  tau: z.number().positive().default(48), // hours
+  // Exploration
+  freshnessWindowHours: z.number().nonnegative().default(72), // < window => bypass seen-penalty + flat boost
+  freshnessBoost: z.number().nonnegative().default(1.25),
+  backCatalogueFraction: z.number().min(0).max(0.5).default(0.2), // share of slots reserved for >30d unwatched
+  backCatalogueMinAgeDays: z.number().nonnegative().default(30),
+  repetitionPenaltyPerShow: z.number().min(0).max(1).default(0.15), // multiplicative decay per prior impression
+  repetitionFloor: z.number().min(0).max(1).default(0.4), // penalty never drops below this
+});
+export type RankingConfig = z.infer<typeof RankingConfigSchema>;
+
+// --- ImpressionState (IndexedDB v2; anti-repetition signal — PHASE_2_SPEC §5) ---
+export const ImpressionStateSchema = z.object({
+  videoId: z.string(),
+  shownCount: z.number().int().nonnegative(), // times surfaced on home but NOT clicked
+  lastShownAt: z.string(), // ISO timestamp
+});
+export type ImpressionState = z.infer<typeof ImpressionStateSchema>;
+
+// Everything the client-side ranker needs beyond the Video pool. `now` is captured once
+// per render so the score order is stable within a paint (no mid-sort clock drift).
+export type RankContext = {
+  now: number;
+  visited: Set<string>;
+  impressions: Map<string, ImpressionState>;
+  config: RankingConfig;
+};
+
 // --- ChannelMeta (channels.list-derived header; internal, not an external boundary) ---
 export type ChannelMeta = {
   channelId: string;

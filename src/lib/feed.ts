@@ -9,7 +9,8 @@
 // surfaced on home — it is reachable via its channel page only. Backfill, when a tier is
 // short, draws only from the other ACTIVE tiers (1 and 2); Tier 3 is excluded structurally.
 
-import type { Video } from "./types";
+import type { RankContext, Video } from "./types";
+import { ageHours, categoryMultipliers, scoreVideo } from "./ranking";
 
 export const HOME_FEED_CAP = 24;
 
@@ -29,24 +30,35 @@ function newestOfTier(videos: Video[], tier: 1 | 2 | 3, limit: number): Video[] 
 }
 
 /**
- * Build the home feed honoring the tier slot split (default 15/9/0), newest-first, capped.
+ * Build the home feed honoring the tier slot split (default 15/9/0), capped at `cap`.
  *
- * Tier 3 always contributes 0 (its slot is 0 and backfill excludes it), so an Entertainment
- * video can never reach home. If a tier has fewer videos than its budget, leftover slots are
- * backfilled with the newest remaining Tier 1/2 videos so the grid still fills toward `cap`.
+ * - **Phase 1 (ctx omitted):** newest-first within each tier's budget — the cold-start ranker.
+ * - **Phase 2 (ctx provided):** the full Focus Feed ranking (PHASE_2_SPEC §6) — S₁/S₂ scoring,
+ *   P_seen, freshness window, per-tier category balance, back-catalogue injection, and
+ *   anti-repetition — applied *inside* each tier's budget.
+ *
+ * In BOTH modes the tier model is supreme: Tier 3 (and parked) videos are never scored, never
+ * slotted, and never backfilled — an Entertainment video can never reach home. Ranking only
+ * reorders within the 15/9 active budget; it can never change the split or surface Tier 3.
  */
 export function buildHomeFeed(
   videos: Video[],
   slots: TierSlots = DEFAULT_TIER_SLOTS,
   cap: number = HOME_FEED_CAP,
+  ctx?: RankContext,
 ): Video[] {
+  if (!ctx) return buildNewestFirst(videos, slots, cap);
+  return buildRanked(videos, slots, cap, ctx);
+}
+
+/** Phase 1 path: newest-first within tier budgets, newest backfill (Tiers 1|2 only), cap. */
+function buildNewestFirst(videos: Video[], slots: TierSlots, cap: number): Video[] {
   const chosen: Video[] = [
     ...newestOfTier(videos, 1, slots.tier1),
     ...newestOfTier(videos, 2, slots.tier2),
     ...newestOfTier(videos, 3, slots.tier3),
   ];
 
-  // Backfill remaining slots from the newest unused ACTIVE-tier (1|2) videos — never Tier 3.
   if (chosen.length < cap) {
     const used = new Set(chosen.map((v) => v.videoId));
     const rest = videos
@@ -60,6 +72,71 @@ export function buildHomeFeed(
   }
 
   return chosen.sort(byNewest).slice(0, cap);
+}
+
+/**
+ * Phase 2 path: score every ACTIVE (Tier 1|2) video, allocate per tier with a back-catalogue
+ * reserve, backfill by score, and order the grid by score. Tier 3 is excluded before scoring,
+ * so the ranker can never grant it a slot.
+ */
+function buildRanked(videos: Video[], slots: TierSlots, cap: number, ctx: RankContext): Video[] {
+  const active = videos.filter((v) => v.tier === 1 || v.tier === 2);
+
+  // Score every active video once (category multipliers computed per tier so balancing stays
+  // inside a tier's budget). S₂ needs the per-tier max view count for log-normalization.
+  const scoreById = new Map<string, number>();
+  for (const tier of [1, 2] as const) {
+    const cand = active.filter((v) => v.tier === tier);
+    const cMap = categoryMultipliers(cand);
+    const maxView = cand.reduce((m, v) => Math.max(m, v.viewCount), 0);
+    for (const v of cand) {
+      scoreById.set(v.videoId, scoreVideo(v, ctx, cMap.get(v.category) ?? 1, maxView));
+    }
+  }
+  const scoreOf = (v: Video): number => scoreById.get(v.videoId) ?? 0;
+  const byScore = (a: Video, b: Video): number => scoreOf(b) - scoreOf(a) || byNewest(a, b);
+
+  const cfg = ctx.config;
+  const minBackAgeHrs = cfg.backCatalogueMinAgeDays * 24;
+  const chosen: Video[] = [];
+  const used = new Set<string>();
+
+  for (const tier of [1, 2] as const) {
+    const budget = tier === 1 ? slots.tier1 : slots.tier2;
+    if (budget <= 0) continue;
+    const ranked = active.filter((v) => v.tier === tier).sort(byScore);
+
+    // Back-catalogue: high-score UNWATCHED videos older than the min age. Reserve only as many
+    // slots as there are real candidates, so the reserve never displaces a higher-score pick
+    // with a recency-backfilled blank when no old gems exist.
+    const backPool = ranked.filter(
+      (v) => !ctx.visited.has(v.videoId) && ageHours(v, ctx.now) > minBackAgeHrs,
+    );
+    const reserve = Math.min(Math.round(budget * cfg.backCatalogueFraction), backPool.length);
+    const back = backPool.slice(0, reserve);
+    const backIds = new Set(back.map((v) => v.videoId));
+    const main = ranked.filter((v) => !backIds.has(v.videoId)).slice(0, budget - reserve);
+
+    for (const v of [...main, ...back]) {
+      if (!used.has(v.videoId)) {
+        chosen.push(v);
+        used.add(v.videoId);
+      }
+    }
+  }
+
+  // Backfill toward cap from the highest-score unused ACTIVE videos — never Tier 3.
+  if (chosen.length < cap) {
+    const rest = active.filter((v) => !used.has(v.videoId)).sort(byScore);
+    for (const v of rest) {
+      if (chosen.length >= cap) break;
+      chosen.push(v);
+      used.add(v.videoId);
+    }
+  }
+
+  // Final grid order is by score (a re-sort by newest here would negate the ranker).
+  return chosen.sort(byScore).slice(0, cap);
 }
 
 /** Channel-archive sort (PRD §5.2). */

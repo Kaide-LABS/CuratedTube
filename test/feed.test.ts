@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildHomeFeed, sortVideos, DEFAULT_TIER_SLOTS, HOME_FEED_CAP } from "../src/lib/feed";
-import type { Tier, Video } from "../src/lib/types";
+import { DEFAULT_RANKING_CONFIG } from "../src/lib/ranking-config";
+import type { ImpressionState, RankContext, Tier, Video } from "../src/lib/types";
 
 // Deterministic Video factory. Newer index => older publish date so order is predictable.
 function mkVideos(tier: Tier, n: number, prefix: string): Video[] {
@@ -73,6 +74,100 @@ describe("buildHomeFeed — tier model (15/9/0)", () => {
   it("exposes the locked default slot budget", () => {
     expect(DEFAULT_TIER_SLOTS).toEqual({ tier1: 15, tier2: 9, tier3: 0 });
     expect(HOME_FEED_CAP).toBe(24);
+  });
+});
+
+// --- Phase 2: ranked mode (PHASE_2_SPEC §8) -------------------------------
+const NOW = Date.UTC(2026, 5, 30, 0, 0, 0);
+
+function rv(over: Partial<Video> & { videoId: string; tier: Tier; hoursOld: number }): Video {
+  const { hoursOld, ...rest } = over;
+  return {
+    channelId: "UCx",
+    channelTitle: "c",
+    channelAvatarUrl: "",
+    title: rest.videoId,
+    thumbnailUrl: "",
+    durationSec: 600,
+    viewCount: 1000,
+    likeCount: 10,
+    publishedAt: new Date(NOW - hoursOld * 3_600_000).toISOString(),
+    category: "Islamic",
+    ...rest,
+  };
+}
+
+function ctxOf(over: {
+  visited?: string[];
+  impressions?: ImpressionState[];
+  config?: Partial<typeof DEFAULT_RANKING_CONFIG>;
+} = {}): RankContext {
+  return {
+    now: NOW,
+    visited: new Set(over.visited ?? []),
+    impressions: new Map((over.impressions ?? []).map((i) => [i.videoId, i])),
+    config: { ...DEFAULT_RANKING_CONFIG, ...over.config },
+  };
+}
+
+describe("buildHomeFeed — ranked mode (Phase 2)", () => {
+  it("is byte-for-byte the Phase 1 newest-first result when ctx is omitted (back-compat)", () => {
+    const pool = [...mkVideos(1, 30, "t1"), ...mkVideos(2, 30, "t2"), ...mkVideos(3, 30, "t3")];
+    expect(buildHomeFeed(pool)).toEqual(buildHomeFeed(pool, DEFAULT_TIER_SLOTS, HOME_FEED_CAP));
+  });
+
+  it("still honors the 15/9/0 split and never surfaces Tier 3 under ranking", () => {
+    const pool = [
+      ...Array.from({ length: 30 }, (_, i) =>
+        rv({ videoId: `a${i}`, tier: 1, hoursOld: 100 + i, viewCount: 1000 + i }),
+      ),
+      ...Array.from({ length: 30 }, (_, i) =>
+        rv({ videoId: `b${i}`, tier: 2, hoursOld: 100 + i, viewCount: 1000 + i }),
+      ),
+      ...Array.from({ length: 30 }, (_, i) =>
+        rv({ videoId: `c${i}`, tier: 3, hoursOld: 100 + i, viewCount: 9_000_000 }),
+      ),
+    ];
+    const feed = buildHomeFeed(pool, DEFAULT_TIER_SLOTS, HOME_FEED_CAP, ctxOf());
+    expect(feed).toHaveLength(24);
+    expect(feed.filter((v) => v.tier === 1)).toHaveLength(15);
+    expect(feed.filter((v) => v.tier === 2)).toHaveLength(9);
+    expect(feed.some((v) => v.tier === 3)).toBe(false); // even with 9M views, Tier 3 never enters
+  });
+
+  it("orders the grid by score (more popular, same age => earlier)", () => {
+    const pool = [
+      rv({ videoId: "low", tier: 1, hoursOld: 200, viewCount: 100 }),
+      rv({ videoId: "high", tier: 1, hoursOld: 200, viewCount: 1_000_000 }),
+      rv({ videoId: "mid", tier: 1, hoursOld: 200, viewCount: 10_000 }),
+    ];
+    const feed = buildHomeFeed(pool, DEFAULT_TIER_SLOTS, HOME_FEED_CAP, ctxOf());
+    expect(feed.map((v) => v.videoId)).toEqual(["high", "mid", "low"]);
+  });
+
+  it("demotes a heavily-shown (anti-repetition) video below an equal never-shown one", () => {
+    const pool = [
+      rv({ videoId: "shown", tier: 1, hoursOld: 300, viewCount: 1000 }),
+      rv({ videoId: "fresh-to-eyes", tier: 1, hoursOld: 300, viewCount: 1000 }),
+    ];
+    const ctx = ctxOf({ impressions: [{ videoId: "shown", shownCount: 6, lastShownAt: "x" }] });
+    const feed = buildHomeFeed(pool, DEFAULT_TIER_SLOTS, HOME_FEED_CAP, ctx);
+    expect(feed[0].videoId).toBe("fresh-to-eyes");
+  });
+
+  it("reserves back-catalogue slots for old unwatched videos when they exist", () => {
+    // 30 high-score recent + 6 low-score old(>30d) unwatched Tier-1 videos. tier1 budget 15,
+    // reserve = round(15*0.2) = 3. The 3 reserved old gems must appear despite losing on score;
+    // the other 3 old ones stay out because the recent backfill outranks them up to the 24-cap.
+    const recent = Array.from({ length: 30 }, (_, i) =>
+      rv({ videoId: `r${i}`, tier: 1, hoursOld: 10 + i, viewCount: 5000 }),
+    );
+    const old = Array.from({ length: 6 }, (_, i) =>
+      rv({ videoId: `o${i}`, tier: 1, hoursOld: 24 * 40 + i, viewCount: 50 }),
+    );
+    const feed = buildHomeFeed([...recent, ...old], DEFAULT_TIER_SLOTS, HOME_FEED_CAP, ctxOf());
+    const oldShown = feed.filter((v) => v.videoId.startsWith("o")).length;
+    expect(oldShown).toBe(3); // exactly the reserve, despite their low score
   });
 });
 
