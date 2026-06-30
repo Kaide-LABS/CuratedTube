@@ -4,7 +4,8 @@ import { getChannelArchive } from "@/lib/data";
 import { formatCount } from "@/lib/format";
 import { ChannelArchive } from "@/components/ChannelArchive";
 
-export const revalidate = 1800;
+// Dynamic: Data API reads use `cache: "no-store"` (the ETag/304 layer governs quota spend).
+export const dynamic = "force-dynamic";
 
 export default async function ChannelPage({
   params,

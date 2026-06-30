@@ -6,9 +6,13 @@
 //   videos.list         https://developers.google.com/youtube/v3/docs/videos/list
 //   channels.list       https://developers.google.com/youtube/v3/docs/channels/list
 //
-// All reads go through Next's fetch with `next.revalidate` so repeated server renders
-// reuse cached payloads (Next 16: fetch is NOT cached unless asked). The revalidate
-// window defaults to the RSS poll cadence (30 min) and is configurable via env.
+// All reads go through a single conditional-fetch path (`apiFetch`) with `cache: "no-store"`,
+// so this module's ETag layer — not Next's fetch cache — is the sole authority on when a quota
+// unit is spent (PHASE_4_SPEC.md §6). Each call sends `If-None-Match`; a `304 Not Modified`
+// returns the previously-validated body at 0 units, a `200` re-validates and re-caches. This
+// makes the Data-API-backed routes (home/channel/watch) render per-request rather than
+// ISR-static — the right trade for a single-user tool, since quota is held down by the 0-unit
+// RSS detection path plus these 304s, not by Next caching opaque payloads.
 
 import "server-only";
 import { z } from "zod";

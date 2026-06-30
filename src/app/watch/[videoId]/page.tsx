@@ -6,7 +6,8 @@ import { MetadataPanel } from "@/components/MetadataPanel";
 import { VideoPreviewCard } from "@/components/VideoPreviewCard";
 import { WatchLaterButton } from "@/components/WatchLaterButton";
 
-export const revalidate = 1800;
+// Dynamic: Data API reads use `cache: "no-store"` (the ETag/304 layer governs quota spend).
+export const dynamic = "force-dynamic";
 
 export default async function WatchPage({
   params,

@@ -19,9 +19,10 @@ Phase 4 (Hardening) deployment guide. CuratedTube is a single-user, server-rende
    - `CT_USE_UULF` = *(leave unset)* — default UULF-primary. Set to `false` only if the UULF
      prefix ever stops resolving globally (per-channel auto-fallback runs regardless).
    - `CT_SHOW_QUOTA` = *(leave unset)* — the dev quota badge stays hidden in production.
-3. **Deploy.** Vercel runs `next build`; the home/channel pages are ISR (30-min revalidate), the
-   watch page is dynamic, `/manifest.webmanifest` + icons are static, and the service worker
-   (`/sw.js`) registers an offline shell.
+3. **Deploy.** Vercel runs `next build`; the home/channel/watch pages render **dynamically**
+   (per-request) because their Data API reads use `cache: "no-store"` so the ETag/304 layer is the
+   sole authority on quota spend; `/manifest.webmanifest` + icons are static, and the service worker
+   (`/sw.js`) registers an offline shell. Quota stays low via the 0-unit RSS detection path + 304s.
 4. **Verify** the deployed app: home Focus Feed renders (≤24, caught-up terminator), channel
    archives sort, a video plays (embed-restricted ones show the "Watch on YouTube" fallback),
    `/watch-later` renders from IndexedDB (0 quota), and the PWA install affordance appears.
