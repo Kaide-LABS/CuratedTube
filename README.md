@@ -26,10 +26,14 @@ Without a key or resolved channels, the app boots and shows an in-app setup noti
 
 ### Configure your channels
 
-Edit `src/config/channels.json` — one entry per channel with `handle` and `category`
-(`Automotive` | `Islamic` | `History` | `AI-Tech`). Then `npm run resolve-channels` looks up
-each `@handle` via `channels.list?forHandle` and writes back `channelId` and the UULF uploads
-playlist id. The seed list is a starting template — replace handles with your own.
+Edit the canonical `channels.json` at the repo root — an object of `{ _meta, channels[] }`
+where each entry carries a `handle`, a free-form `category`, and a `tier` (`1` Beneficial /
+`2` Educational / `3` Entertainment; `null` parks the channel out of all feeds). `tier` — not
+category — drives home composition (15 Tier 1 / 9 Tier 2 / 0 Tier 3). Then `npm run
+resolve-channels` resolves each unresolved `@handle` **yt-dlp-first (0 quota)** with a
+`channels.list?forHandle` fallback, derives the UULF uploads playlist id, verifies it via the
+zero-quota RSS feed, enriches title/avatar/subs, and emits `VALIDATION_REPORT.md`. Already-resolved
+`UC…` ids are preserved byte-for-byte; no id is ever fabricated.
 
 > UULF (long-form only) is the primary uploads source (D2), behind one swappable resolver
 > (`resolveUploadsPlaylistId`). If the undocumented UULF prefix ever stops resolving, set

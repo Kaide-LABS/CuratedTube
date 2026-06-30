@@ -28,8 +28,9 @@ declare global {
 }
 
 // Locked distraction-suppressing params (Pass A, 2026-06-29). rel=0 keeps related videos
-// in-channel only; modestbranding is deprecated and omitted; iv_load_policy=3 hides
-// annotations; playsinline=1 avoids forced iOS fullscreen.
+// in-channel only; iv_load_policy=3 hides annotations; playsinline=1 avoids forced iOS
+// fullscreen. modestbranding is deprecated (Aug 2023, no effect) and is OMITTED per the
+// locked set in CuratedTube_PRD.md §10 / CuratedTube_context.md §8.
 const PLAYER_VARS = {
   rel: 0,
   controls: 1,
@@ -38,7 +39,6 @@ const PLAYER_VARS = {
   disablekb: 0,
   fs: 1,
   color: "white",
-  modestbranding: 1, // harmless no-op; kept for older clients
 } as const;
 
 let apiLoading: Promise<void> | null = null;

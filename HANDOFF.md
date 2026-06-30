@@ -19,7 +19,7 @@ items resolved and written back into `CuratedTube_PRD.md §10` and `CuratedTube_
 | Resolver (D2) | `src/lib/channels.ts`, `scripts/resolve-channels.mjs` | UULF primary, UU fallback in one place |
 | Data module | `src/lib/youtube.ts` | `getUploads`, `enrich`, `getChannelMeta`, ISO-8601 parser; server-only; never `search.list` |
 | RSS poller | `src/lib/rss.ts` | 0-quota upload detection; fails soft |
-| Feed builder | `src/lib/feed.ts` | category-balanced (`C_cat = mean/n_cat`), newest-first, cap 24 |
+| Feed builder | `src/lib/feed.ts` | tier-weighted slots (15 Tier 1 / 9 Tier 2 / 0 Tier 3), newest-first, cap 24 |
 | Quota counter | `src/lib/quota.ts`, `/api/quota`, `QuotaBadge` | per-call-type units, 80% alert |
 | Aggregators | `src/lib/data.ts` | RSS-primary home, channel archive, watch (same-channel rail) |
 | Watch state | `src/lib/watchState.ts` | IndexedDB visited set; de-emphasis |
@@ -38,13 +38,18 @@ no global search, no time-on-app metric.
   playback compile and are wired but unverified end-to-end. First real run: add a key, run
   `npm run resolve-channels`, then `npm run dev`.
 
+## Roster (canonical, resolved)
+
+- **89 real channels** resolved into the root `channels.json` — Tier 1 (Islamic) ×21, Tier 2
+  (Educational) ×50, Tier 3 (Entertainment) ×14, plus 4 parked (`tier:null`). All carry a real
+  `UC…` channelId, a verified `UULF…` uploads playlist, and enriched title/avatar/subs. 0
+  UNRESOLVED, 0 UULF→UU fallbacks, 0 duplicates, ~2 Data API units used. Audit: `VALIDATION_REPORT.md`.
+- **17 channels flagged `confirm:true`** — they are tiered and active, but want a human tier/
+  category check. The 4 parked entries (`@monium`, `@Tomographic`, `@LitNomad`, `@leonjhendrix`)
+  stay out of every feed until classified.
+
 ## UNRESOLVED
 
-- **Seed channel handles are placeholders.** `src/config/channels.json` ships the correct
-  category distribution (Automotive 5 / Islamic 9 / History 4 / AI-Tech 2 = 20) with plausible
-  handles. Replace with your actual channels; `resolve-channels` logs any handle that doesn't
-  resolve. (Note: distribution differs slightly from `context.md §5`'s 5/9/4/2 example — `C_cat`
-  is computed dynamically from whatever is in `channels.json`, so it self-adjusts.)
 - **iOS PWA storage limits** — left `UNRESOLVED` (version-dependent, non-blocking). Re-verify in
   Phase 3 before relying on offline durability.
 - **UULF prefix risk** — undocumented; if it breaks, flip `USE_UULF=false` (one-line swap).

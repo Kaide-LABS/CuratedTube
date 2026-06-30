@@ -4,6 +4,7 @@
 // duration) still goes through videos.list. Verified compatible with UULF playlists.
 
 import "server-only";
+import { z } from "zod";
 import { XMLParser } from "fast-xml-parser";
 
 const FEED_BASE = "https://www.youtube.com/feeds/videos.xml";
@@ -17,19 +18,23 @@ export type RssEntry = {
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
 
-type AtomFeed = {
-  feed?: {
-    entry?:
-      | AtomEntry
-      | AtomEntry[];
-  };
-};
-type AtomEntry = {
-  "yt:videoId"?: string;
-  "yt:channelId"?: string;
-  title?: string;
-  published?: string;
-};
+// Deterministic validation boundary for the Atom feed (same posture as the Data API in
+// youtube.ts): the untyped XMLParser output is parsed with Zod before any field is read,
+// rather than asserted with an `as` cast. Unknown keys are tolerated; `title` may be a
+// string or an object (xml-parser quirk), so it is coerced loosely and normalized below.
+const AtomEntrySchema = z.object({
+  "yt:videoId": z.string().optional(),
+  "yt:channelId": z.string().optional(),
+  title: z.unknown().optional(),
+  published: z.string().optional(),
+});
+const AtomFeedSchema = z.object({
+  feed: z
+    .object({
+      entry: z.union([AtomEntrySchema, z.array(AtomEntrySchema)]).optional(),
+    })
+    .optional(),
+});
 
 /**
  * Poll a playlist's RSS feed for its recent uploads. Returns [] on any network/parse
@@ -41,8 +46,9 @@ export async function pollUploads(uploadsPlaylistId: string): Promise<RssEntry[]
     const res = await fetch(url, { next: { revalidate: 1800 } });
     if (!res.ok) return [];
     const xml = await res.text();
-    const data = parser.parse(xml) as AtomFeed;
-    const raw = data.feed?.entry;
+    const parsed = AtomFeedSchema.safeParse(parser.parse(xml));
+    if (!parsed.success) return [];
+    const raw = parsed.data.feed?.entry;
     if (!raw) return [];
     const entries = Array.isArray(raw) ? raw : [raw];
     return entries

@@ -23,7 +23,7 @@ export function SetupNotice({ reason }: { reason: "no-api-key" | "no-channels" }
           <div className="mt-4 space-y-3 text-sm text-zinc-400">
             <p>
               No channels are resolved yet. Add your handles to{" "}
-              <code className="rounded bg-zinc-800 px-1">src/config/channels.json</code> and run:
+              <code className="rounded bg-zinc-800 px-1">channels.json</code> (repo root) and run:
             </p>
             <pre className="overflow-x-auto rounded-lg bg-zinc-950 p-3 text-xs text-zinc-300">
               npm run resolve-channels
