@@ -4,6 +4,7 @@ import { getWatchData } from "@/lib/data";
 import { WatchPlayer } from "@/components/WatchPlayer";
 import { MetadataPanel } from "@/components/MetadataPanel";
 import { VideoPreviewCard } from "@/components/VideoPreviewCard";
+import { WatchLaterButton } from "@/components/WatchLaterButton";
 
 export const revalidate = 1800;
 
@@ -23,16 +24,19 @@ export default async function WatchPage({
       <div className="lg:col-span-2">
         <WatchPlayer videoId={video.videoId} />
         <MetadataPanel video={video} />
-        <Link
-          href={`/channel/${video.channelId}`}
-          className="mt-4 flex items-center gap-3 hover:opacity-90"
-        >
-          {meta?.avatarUrl && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={meta.avatarUrl} alt="" className="h-10 w-10 rounded-full bg-zinc-800" />
-          )}
-          <span className="text-sm font-medium text-zinc-200">{video.channelTitle}</span>
-        </Link>
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <Link
+            href={`/channel/${video.channelId}`}
+            className="flex items-center gap-3 hover:opacity-90"
+          >
+            {meta?.avatarUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={meta.avatarUrl} alt="" className="h-10 w-10 rounded-full bg-zinc-800" />
+            )}
+            <span className="text-sm font-medium text-zinc-200">{video.channelTitle}</span>
+          </Link>
+          <WatchLaterButton video={video} />
+        </div>
       </div>
 
       {/* Same-channel rail only — never cross-channel recommendations (PRD §5.3) */}

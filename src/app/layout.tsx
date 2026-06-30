@@ -2,11 +2,16 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
 import { QuotaBadge } from "@/components/QuotaBadge";
+import { SessionGuard } from "@/components/SessionGuard";
+import { InstallPrompt } from "@/components/InstallPrompt";
 
 export const metadata: Metadata = {
   title: "CuratedTube",
   description: "Keep the discovery, kill the rabbit hole. A focus-oriented scoped YouTube client.",
   applicationName: "CuratedTube",
+  manifest: "/manifest.webmanifest",
+  // iOS standalone hints (beforeinstallprompt is unsupported there — PRD §9 / context.md §9).
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CuratedTube" },
 };
 
 export const viewport: Viewport = {
@@ -27,10 +32,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </span>
               <span className="text-zinc-100">CuratedTube</span>
             </Link>
-            <QuotaBadge />
+            <div className="flex items-center gap-3">
+              <Link
+                href="/watch-later"
+                className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Watch Later
+              </Link>
+              <InstallPrompt />
+              <QuotaBadge />
+            </div>
           </div>
         </header>
         <main className="mx-auto max-w-7xl">{children}</main>
+        {/* Focus limiter: a background monitor that prompts a break, never advances playback. */}
+        <SessionGuard />
       </body>
     </html>
   );

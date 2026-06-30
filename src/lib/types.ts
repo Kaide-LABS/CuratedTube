@@ -136,6 +136,38 @@ export type RankContext = {
   config: RankingConfig;
 };
 
+// --- Watch Later (IndexedDB v3; PHASE_3_SPEC.md §3/§5) -------------------------
+// A full Video snapshot saved at click time + the save timestamp. Storing the whole
+// Video means the Watch Later surface renders entirely from IndexedDB with ZERO added
+// YouTube Data API quota (PHASE_3_SPEC §7). Read back for display only — not an
+// external-API boundary, but schema-defined so the saved shape stays in lockstep with Video.
+export const WatchLaterEntrySchema = VideoSchema.extend({
+  addedAt: z.string(), // ISO timestamp the user saved it
+});
+export type WatchLaterEntry = z.infer<typeof WatchLaterEntrySchema>;
+
+// --- Session limiter (IndexedDB v3; PHASE_3_SPEC.md §3/§5) ---------------------
+// One active-playback segment. The rolling-window limiter sums these to decide when to
+// prompt a break (PRD §6 / context.md §5). `endedAt` is kept fresh by a heartbeat while a
+// video plays, so an abandoned tab cannot inflate active time (see PHASE_3_SPEC §6 critique).
+export const SessionSegmentSchema = z.object({
+  startedAt: z.string(), // ISO; keyPath in the `session` store
+  endedAt: z.string().nullable(), // ISO; null only for an in-memory open segment
+  activeMs: z.number().int().nonnegative(), // accumulated active ms for this segment
+  videoId: z.string(),
+});
+export type SessionSegment = z.infer<typeof SessionSegmentSchema>;
+
+// Session-limit policy (validated; one source of tunable defaults — session-config.ts).
+export const SessionConfigSchema = z.object({
+  activeLimitMinutes: z.number().positive().default(30), // PRD §6 / context.md §5
+  rollingWindowHours: z.number().positive().default(4), // PRD §6 / context.md §5
+  snoozeMinutes: z.number().positive().default(10), // re-prompt cadence after a dismiss
+  pollSeconds: z.number().positive().default(30), // SessionGuard tick
+  heartbeatSeconds: z.number().positive().default(15), // WatchPlayer active-segment heartbeat
+});
+export type SessionConfig = z.infer<typeof SessionConfigSchema>;
+
 // --- ChannelMeta (channels.list-derived header; internal, not an external boundary) ---
 export type ChannelMeta = {
   channelId: string;

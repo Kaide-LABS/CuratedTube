@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { markVisited } from "@/lib/watchState";
+import { recordActiveSegment } from "@/lib/sessionStore";
+import { mergeSegment } from "@/lib/session";
+import { DEFAULT_SESSION_CONFIG } from "@/lib/session-config";
+import type { SessionSegment } from "@/lib/types";
 
 // Minimal typings for the IFrame Player API surface we use.
 type YTPlayer = { destroy: () => void };
@@ -59,15 +63,38 @@ function loadIframeApi(): Promise<void> {
   return apiLoading;
 }
 
+// YouTube IFrame player state codes (only PLAYING is "active" for the session limiter).
+const YT_PLAYING = 1;
+
 export function WatchPlayer({ videoId }: { videoId: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YTPlayer | null>(null);
+  // Focus-limiter bookkeeping: the currently-open active-playback segment + its heartbeat timer.
+  // The heartbeat keeps the persisted segment's endedAt fresh so an abandoned tab cannot inflate
+  // active time (PHASE_3_SPEC §6). None of this advances playback — it only records activity.
+  const openSegRef = useRef<SessionSegment | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [errored, setErrored] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     // Record the visit immediately on open (PRD §9.7 de-emphasis signal).
     markVisited(videoId);
+
+    const stopHeartbeat = (): void => {
+      if (heartbeatRef.current !== null) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+    };
+
+    // Close any open segment (paused/ended/unmount) and persist it. Never starts a new video.
+    const closeSegment = (): void => {
+      const seg = mergeSegment(openSegRef.current, Date.now(), videoId, false);
+      openSegRef.current = null;
+      stopHeartbeat();
+      if (seg) void recordActiveSegment(seg);
+    };
 
     loadIframeApi().then(() => {
       if (cancelled || !hostRef.current || !window.YT?.Player) return;
@@ -80,12 +107,32 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
           onError: (e) => {
             if (e.data === 101 || e.data === 150 || e.data === 153) setErrored(true);
           },
+          // Focus limiter only: open/extend an active segment while PLAYING, close it otherwise.
+          // ENDED (data === 0) closes the segment and does NOTHING else — there is NO autoplay
+          // and NO next-video load (PRD §2 non-negotiable / PHASE_3_SPEC §9).
+          onStateChange: (e) => {
+            const playing = e.data === YT_PLAYING;
+            if (playing) {
+              openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
+              if (openSegRef.current) void recordActiveSegment(openSegRef.current);
+              if (heartbeatRef.current === null) {
+                heartbeatRef.current = setInterval(() => {
+                  if (!openSegRef.current) return;
+                  openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
+                  if (openSegRef.current) void recordActiveSegment(openSegRef.current);
+                }, DEFAULT_SESSION_CONFIG.heartbeatSeconds * 1000);
+              }
+            } else {
+              closeSegment();
+            }
+          },
         },
       });
     });
 
     return () => {
       cancelled = true;
+      closeSegment();
       try {
         playerRef.current?.destroy();
       } catch {

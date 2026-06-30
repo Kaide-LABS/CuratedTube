@@ -1,25 +1,35 @@
-// Client-only personal state in IndexedDB (PRD D3, §9.7; PHASE_2_SPEC §5). Single-user, no
-// backend. v1 stored watch state (visited videos) to de-emphasize watched cards. v2 adds an
-// `impressions` store: which videos were SHOWN on home but not clicked — the anti-repetition
-// signal for the Phase 2 ranker. The migration is additive and idempotent from a fresh state.
+// Client-only personal state in IndexedDB (PRD D3, §9.7; PHASE_2_SPEC §5, PHASE_3_SPEC §5).
+// Single-user, no backend. v1 stored watch state (visited videos) to de-emphasize watched cards.
+// v2 added an `impressions` store (anti-repetition signal for the Phase 2 ranker). v3 adds the
+// `watchLater` and `session` stores (Phase 3). This module owns the SINGLE DB-open path and the
+// full schema; watchLater.ts and sessionStore.ts reuse the exported `openDB`/`tx`. Every migration
+// is additive and idempotent from a fresh state (v1, v2, or v3).
 "use client";
 
 import type { ImpressionState, WatchState } from "./types";
 
 const DB_NAME = "curatedtube";
-const DB_VERSION = 2; // v1 -> v2: add the `impressions` store (watchState preserved)
+const DB_VERSION = 3; // v2 -> v3: add `watchLater` + `session` (watchState/impressions preserved)
 const WATCH_STORE = "watchState";
 const IMPRESSION_STORE = "impressions";
+const WATCH_LATER_STORE = "watchLater";
+const SESSION_STORE = "session";
 
-function openDB(): Promise<IDBDatabase> {
+/**
+ * Open (and migrate) the shared `curatedtube` IndexedDB. The single DB-open path for every
+ * store; watchLater.ts and sessionStore.ts import this rather than calling `indexedDB.open`
+ * with a different version. Rejects when IndexedDB is unavailable (SSR / private mode).
+ */
+export function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
       reject(new Error("IndexedDB unavailable"));
       return;
     }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    // Additive migration: every createObjectStore is guarded so upgrading a v1 db only ADDS
-    // `impressions` (no rewrite of watchState) and a fresh db creates both. Re-running is a no-op.
+    // Additive migration: every createObjectStore is guarded by a `contains` check, so a v1 or v2
+    // db gains only the missing stores (no rewrite of existing data) and a fresh db creates all
+    // four. Re-running any upgrade is a no-op, so the bump is safe from any starting version.
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(WATCH_STORE)) {
@@ -28,13 +38,20 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(IMPRESSION_STORE)) {
         db.createObjectStore(IMPRESSION_STORE, { keyPath: "videoId" });
       }
+      if (!db.objectStoreNames.contains(WATCH_LATER_STORE)) {
+        db.createObjectStore(WATCH_LATER_STORE, { keyPath: "videoId" });
+      }
+      if (!db.objectStoreNames.contains(SESSION_STORE)) {
+        db.createObjectStore(SESSION_STORE, { keyPath: "startedAt" });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-function tx<T>(
+/** Run one IndexedDB request inside a transaction on `store`, resolving its result. */
+export function tx<T>(
   store: string,
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => IDBRequest<T>,

@@ -18,6 +18,8 @@ export default defineConfig({
         "src/lib/feed.ts",
         "src/lib/ranking.ts",
         "src/lib/ranking-config.ts",
+        "src/lib/session.ts",
+        "src/lib/session-config.ts",
         "src/lib/channels.ts",
         "src/lib/types.ts",
         "src/lib/quota.ts",
