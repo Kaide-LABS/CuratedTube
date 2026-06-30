@@ -11,8 +11,10 @@ const csp = [
   // Next inline bootstrap + the YouTube IFrame API (www.youtube.com) and its widget host (s.ytimg.com).
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.youtube.com https://s.ytimg.com",
   "style-src 'self' 'unsafe-inline'",
-  // Thumbnails/avatars (ytimg/ggpht/googleusercontent) + data/blob for inlined assets.
-  "img-src 'self' data: blob: https://i.ytimg.com https://*.ggpht.com https://yt3.googleusercontent.com",
+  // Thumbnails (i/i1–i9.ytimg.com mirrors) + avatars (yt3.ggpht.com / yt3.googleusercontent.com)
+  // + data/blob for inlined assets. The *.ytimg.com wildcard covers every thumbnail mirror host
+  // YouTube rotates through, so a thumbnail never gets CSP-refused for being served from i9 vs i.
+  "img-src 'self' data: blob: https://i.ytimg.com https://i9.ytimg.com https://*.ytimg.com https://yt3.ggpht.com https://*.ggpht.com https://yt3.googleusercontent.com",
   "font-src 'self' data:",
   // The player iframe only. The Data API is called server-side; googleapis is allowed for safety.
   "frame-src https://www.youtube.com https://www.youtube-nocookie.com",
@@ -38,12 +40,16 @@ const securityHeaders = [
 
 const nextConfig = {
   images: {
-    // YouTube thumbnail + avatar hosts.
+    // YouTube thumbnail + avatar hosts. NOTE: the feed renders thumbnails/avatars as plain <img>
+    // (VideoPreviewCard), so these patterns are not what gates them today (CSP img-src does) — they
+    // are kept correct so any future <Image> usage of these hosts works without the optimizer 400ing.
     remotePatterns: [
       { protocol: "https", hostname: "i.ytimg.com" },
+      { protocol: "https", hostname: "i9.ytimg.com" },
+      { protocol: "https", hostname: "*.ytimg.com" },
       { protocol: "https", hostname: "yt3.ggpht.com" },
-      { protocol: "https", hostname: "yt3.googleusercontent.com" },
       { protocol: "https", hostname: "*.ggpht.com" },
+      { protocol: "https", hostname: "yt3.googleusercontent.com" },
     ],
   },
   async headers() {
