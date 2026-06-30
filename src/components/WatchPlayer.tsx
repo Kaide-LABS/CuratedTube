@@ -17,6 +17,7 @@ declare global {
       Player: new (
         el: HTMLElement,
         opts: {
+          host?: string;
           videoId: string;
           playerVars: Record<string, number | string>;
           events: {
@@ -99,6 +100,11 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
     loadIframeApi().then(() => {
       if (cancelled || !hostRef.current || !window.YT?.Player) return;
       playerRef.current = new window.YT.Player(hostRef.current, {
+        // Privacy-enhanced embed host: youtube-nocookie.com sets no tracking cookies until the
+        // user plays, and is friendlier to network/DNS blocks of youtube.com proper (the CSP
+        // frame-src allows it — see next.config.mjs). The IFrame API loader script still comes
+        // from www.youtube.com; only the player iframe origin changes.
+        host: "https://www.youtube-nocookie.com",
         videoId,
         playerVars: { ...PLAYER_VARS },
         events: {
