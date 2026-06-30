@@ -7,7 +7,7 @@
 // reads activity so the UI can prompt a break (the anti-distraction boundary, PHASE_3_SPEC §0).
 "use client";
 
-import { openDB, tx } from "./watchState";
+import { tx } from "./watchState";
 import { pruneSegments } from "./session";
 import type { SessionSegment } from "./types";
 

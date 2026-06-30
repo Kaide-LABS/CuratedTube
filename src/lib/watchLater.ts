@@ -6,7 +6,7 @@
 // degrade silently when storage is unavailable (private mode / SSR), matching watchState.ts.
 "use client";
 
-import { openDB, tx } from "./watchState";
+import { tx } from "./watchState";
 import type { Video, WatchLaterEntry } from "./types";
 
 const STORE = "watchLater";
