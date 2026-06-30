@@ -2,8 +2,16 @@
 
 import { useEffect, useState } from "react";
 
-type Snapshot = { total: number; daily: number; pct: number; alert: boolean };
+type Snapshot = {
+  total: number;
+  daily: number;
+  pct: number;
+  alert: boolean;
+  savedUnits: number;
+  visible: boolean;
+};
 
+/** Dev-only Data API unit counter. Hidden in production unless CT_SHOW_QUOTA=1 (PHASE_4_SPEC §4). */
 export function QuotaBadge() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
 
@@ -22,11 +30,12 @@ export function QuotaBadge() {
     };
   }, []);
 
-  if (!snap) return null;
+  // Hidden until loaded, and hidden in production unless the server opts the badge in.
+  if (!snap || !snap.visible) return null;
 
   return (
     <span
-      title="YouTube Data API units used today (resets every 24h)"
+      title={`YouTube Data API units used today (resets every 24h). ${snap.savedUnits} units saved via 304s.`}
       className={`rounded-full border px-2.5 py-1 font-mono text-xs ${
         snap.alert
           ? "border-red-800 bg-red-950/60 text-red-300"

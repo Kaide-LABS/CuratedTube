@@ -46,6 +46,23 @@ No Shorts surface · no comments · no autoplay-next · no infinite scroll · no
 finite 24-item home ending in a caught-up block · same-channel rail only on watch ·
 no metric optimizes for time-on-app.
 
+## Deploy
+
+Deploy to Vercel: import the repo (Next.js auto-detected), set `YOUTUBE_API_KEY` as a **server-side**
+Environment Variable (never `NEXT_PUBLIC_`), and deploy. Optional: `CT_USE_UULF=false` forces the UU
+fallback globally; `CT_SHOW_QUOTA=1` shows the dev quota badge in production. Security headers + CSP
+are defined once in `next.config.mjs`. Full steps and the "block YouTube across your devices" runbook
+are in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+### Quota & fallback (hardening)
+
+- **Conditional requests:** Data API reads send `If-None-Match`; an unchanged payload returns `304` at
+  **0 units**, served from an already-validated server-side ETag cache (`src/lib/etagCache.ts`).
+- **UULF→UU fallback (D2):** if a channel's long-form `UULF` uploads playlist lists nothing, the data
+  layer transparently re-lists the full `UU` playlist and filters Shorts client-side — **per channel**,
+  so one broken playlist never blanks the feed. It never calls `search.list`.
+- The counter (`/api/quota`) alerts at 80% of the 10,000/day budget and reports units saved via 304s.
+
 ## Layout
 
 ```

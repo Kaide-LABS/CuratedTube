@@ -23,6 +23,7 @@ export default defineConfig({
         "src/lib/channels.ts",
         "src/lib/types.ts",
         "src/lib/quota.ts",
+        "src/lib/etagCache.ts",
         "scripts/roster-lib.mjs",
       ],
       thresholds: { lines: 80, functions: 80, statements: 80, branches: 70 },

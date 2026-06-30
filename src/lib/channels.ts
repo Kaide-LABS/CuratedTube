@@ -15,7 +15,20 @@ import { RosterSchema, type ChannelConfig, type Category, type Tier } from "./ty
 
 // Flip to false to fall back to UU (full uploads) if UULF ever stops resolving.
 // When false, the data layer must additionally drop Shorts (see youtube.ts isShort()).
-export const USE_UULF = true;
+// Driven by env so the fallback can be forced in production without a code change
+// (CT_USE_UULF="false" => global UU mode); defaults to true (UULF-primary, D2).
+export const USE_UULF: boolean = process.env.CT_USE_UULF !== "false";
+
+/**
+ * Pure predicate for the per-channel UULF→UU fallback drill (Implements PHASE_4_SPEC.md §4/§6).
+ * A UULF uploads playlist that lists nothing — or whose listed items yield no long-form video —
+ * is treated as broken/empty, so the data layer transparently re-lists the channel's full `UU`
+ * uploads playlist and filters Shorts client-side (D2). Deterministic and side-effect-free so the
+ * fallback decision is unit-testable without any network.
+ */
+export function shouldFallbackToUU(uulfItemCount: number, longformCount: number): boolean {
+  return uulfItemCount === 0 || longformCount === 0;
+}
 
 /**
  * Resolve a channel's uploads playlist id from its channel id (D2).

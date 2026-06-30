@@ -21,6 +21,8 @@ type QuotaState = {
   total: number;
   byType: Record<QuotaCallType, number>;
   windowStart: number; // epoch ms of the current rolling 24h window
+  conditionalHits: number; // count of 304 Not Modified responses served at 0 units this window
+  savedUnits: number; // units avoided via 304s (observability only — never negative)
 };
 
 // Survive Next.js dev hot-reload by stashing on globalThis.
@@ -31,6 +33,8 @@ function freshState(now: number): QuotaState {
     total: 0,
     byType: { "playlistItems.list": 0, "videos.list": 0, "channels.list": 0 },
     windowStart: now,
+    conditionalHits: 0,
+    savedUnits: 0,
   };
 }
 
@@ -56,6 +60,25 @@ export function recordQuota(type: QuotaCallType, calls = 1): void {
   console.log(
     `[${tag}] +${cost} (${type}) -> ${s.total}/${DAILY_QUOTA} units (${(pct * 100).toFixed(1)}%)`,
   );
+}
+
+/**
+ * Record a conditional Data API request (Implements PHASE_4_SPEC.md §6). A `304 Not Modified`
+ * costs 0 units, so it only increments the observability counters; a non-304 (a real `200`)
+ * defers to {@link recordQuota} for the normal per-type accounting + 80% alert. This is the one
+ * place that knows a conditional request's outcome, so the quota math stays correct: skipping an
+ * unchanged payload can only ever *lower* the day's unit total.
+ */
+export function recordConditional(type: QuotaCallType, hit304: boolean): void {
+  if (!hit304) {
+    recordQuota(type, 1);
+    return;
+  }
+  const s = state();
+  s.conditionalHits += 1;
+  s.savedUnits += COST[type];
+  // eslint-disable-next-line no-console
+  console.log(`[quota] 304 (${type}) -> +0 units (saved ${s.savedUnits} total this window)`);
 }
 
 export function quotaSnapshot(): QuotaState & { pct: number; alert: boolean } {

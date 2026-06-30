@@ -12,9 +12,16 @@
 
 import "server-only";
 import { z } from "zod";
-import { recordQuota } from "./quota";
+import { recordConditional, type QuotaCallType } from "./quota";
+import { getCachedBody, getETag, setCached } from "./etagCache";
 import { VideoSchema, type Category, type ChannelMeta, type Tier, type Video } from "./types";
-import { getCategoryOf, getTierOf, USE_UULF } from "./channels";
+import {
+  getCategoryOf,
+  getTierOf,
+  resolveUploadsPlaylistId,
+  shouldFallbackToUU,
+  USE_UULF,
+} from "./channels";
 
 const API_BASE = "https://www.googleapis.com/youtube/v3";
 
@@ -37,30 +44,91 @@ export function hasApiKey(): boolean {
   return Boolean(process.env.YOUTUBE_API_KEY);
 }
 
-function revalidateSeconds(): number {
-  const v = Number(process.env.CT_REVALIDATE_SECONDS);
-  return Number.isFinite(v) && v > 0 ? v : 1800;
-}
-
 // Deterministic validation boundary: every Data API response is parsed with a Zod schema
 // before any field is read. A shape that doesn't match the documented response fails here
 // rather than producing silent `undefined`s downstream. Unknown keys are tolerated (the API
 // returns far more than we read); the fields we consume are validated.
+//
+// Conditional-request hardening (PHASE_4_SPEC.md §6): each call sends `If-None-Match` with the
+// ETag of the last good response. A `304 Not Modified` returns the previously-validated body at
+// **0 quota units**; a `200` re-validates, re-caches the ETag+body, and records the unit. Quota
+// accounting is folded in here (via the call `type`) so the 304 path is provably free. We use
+// `cache: "no-store"` so this ETag layer — not Next's fetch cache — is the single authority on
+// when a unit is spent; this makes the Data-API-backed routes (home/channel/watch) render
+// per-request rather than ISR-static, which is the right trade for a single-user tool: quota is
+// held down by the 0-unit RSS detection path + these 304s, not by Next caching opaque payloads.
 async function apiGet<T>(
   path: string,
   params: Record<string, string>,
   schema: z.ZodType<T>,
+  type: QuotaCallType,
 ): Promise<T> {
   const url = new URL(`${API_BASE}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set("key", apiKey());
 
-  const res = await fetch(url, { next: { revalidate: revalidateSeconds() } });
+  // Cache/error key excludes the secret `key` param: the API key never enters the ETag map
+  // nor any thrown error/log line.
+  const safeParams = new URLSearchParams(url.searchParams);
+  safeParams.delete("key");
+  const cacheKey = `${path}?${safeParams.toString()}`;
+
+  return apiFetch(url, cacheKey, path, schema, type);
+}
+
+/** Single conditional-fetch path: attaches If-None-Match, accounts quota, resolves 200/304. */
+async function apiFetch<T>(
+  url: URL,
+  cacheKey: string,
+  label: string,
+  schema: z.ZodType<T>,
+  type: QuotaCallType,
+): Promise<T> {
+  const etag = getETag(cacheKey);
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: etag ? { "If-None-Match": etag } : undefined,
+  });
+
+  if (res.status === 304) {
+    recordConditional(type, true); // 0 units
+    const cached = getCachedBody<T>(cacheKey);
+    if (cached !== undefined) return cached;
+    // Defensive: a 304 without a cached body (ETag + body are written together, so this is
+    // effectively unreachable). Re-request unconditionally and pay the one unit.
+    return apiFetchUnconditional(url, cacheKey, label, schema, type);
+  }
+
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`YouTube API ${path} ${res.status}: ${body.slice(0, 300)}`);
+    throw new Error(`YouTube API ${label} ${res.status}: ${body.slice(0, 300)}`);
   }
-  return schema.parse(await res.json());
+
+  const parsed = schema.parse(await res.json());
+  const freshEtag = res.headers.get("ETag");
+  if (freshEtag) setCached(cacheKey, freshEtag, parsed);
+  recordConditional(type, false); // +COST[type]
+  return parsed;
+}
+
+/** Unconditional re-fetch (no If-None-Match); used only on the unreachable 304-without-body path. */
+async function apiFetchUnconditional<T>(
+  url: URL,
+  cacheKey: string,
+  label: string,
+  schema: z.ZodType<T>,
+  type: QuotaCallType,
+): Promise<T> {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`YouTube API ${label} ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const parsed = schema.parse(await res.json());
+  const freshEtag = res.headers.get("ETag");
+  if (freshEtag) setCached(cacheKey, freshEtag, parsed);
+  recordConditional(type, false);
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +265,8 @@ export async function getUploads(
       "playlistItems",
       params,
       PlaylistItemsResponseSchema,
+      "playlistItems.list",
     );
-    recordQuota("playlistItems.list");
     for (const it of data.items) {
       const videoId = it.contentDetails?.videoId;
       if (!videoId) continue;
@@ -214,10 +282,61 @@ export async function getUploads(
   return refs;
 }
 
+/** A `UU…` *full-uploads* playlist id (not the long-form `UULF…` variant). */
+function isUuFull(playlistId: string): boolean {
+  return playlistId.startsWith("UU") && !playlistId.startsWith("UULF");
+}
+
+// ---------------------------------------------------------------------------
+// getChannelUploads — list a channel's uploads with the UULF→UU fallback drill (D2).
+// ---------------------------------------------------------------------------
+/**
+ * List a channel's uploads, transparently falling back from the long-form `UULF` playlist to the
+ * full `UU` uploads playlist when `UULF` lists nothing (Implements PHASE_4_SPEC.md §4/§6, D2).
+ *
+ * The fallback is **per channel**, so one channel's broken `UULF` never blanks the whole feed.
+ * It NEVER calls `search.list`. `usedUU` is true when the *final* playlist was a `UU` full-uploads
+ * list (via fallback, or because the supplied primary was already `UU`); callers must then enrich
+ * those ids with `{ filterShorts: true }` so no Short reaches a surface.
+ *
+ * @param channelId        the channel's `UC…` id (source for the `UU`/`UULF` derivation)
+ * @param opts.primaryPlaylistId  the playlist to try first (defaults to the resolved `UULF…`)
+ */
+export async function getChannelUploads(
+  channelId: string,
+  opts: { primaryPlaylistId?: string; maxPages?: number; pageSize?: number } = {},
+): Promise<{ refs: UploadRef[]; usedUU: boolean }> {
+  const { primaryPlaylistId, ...page } = opts;
+  const primary = primaryPlaylistId ?? resolveUploadsPlaylistId(channelId);
+
+  let refs = await getUploads(primary, page);
+  let finalPlaylistId = primary;
+
+  // Only a long-form `UULF` primary can fall back; `longformCount` is unknown at list time, so we
+  // key the listing-stage decision on the item count (a broken/empty `UULF` lists nothing).
+  if (primary.startsWith("UULF") && shouldFallbackToUU(refs.length, refs.length)) {
+    const uuPlaylistId = resolveUploadsPlaylistId(channelId, { useUULF: false });
+    refs = await getUploads(uuPlaylistId, page);
+    finalPlaylistId = uuPlaylistId;
+  }
+
+  return { refs, usedUU: isUuFull(finalPlaylistId) };
+}
+
 // ---------------------------------------------------------------------------
 // enrich — hydrate video ids into full Video objects. videos.list, batch 50. 1 unit/batch.
 // ---------------------------------------------------------------------------
-export async function enrich(videoIds: string[]): Promise<Video[]> {
+/**
+ * Hydrate video ids into full {@link Video} objects (videos.list, batched at 50).
+ * `opts.filterShorts` drops Shorts (≤60s) client-side; it defaults to `!USE_UULF` (the global
+ * UU mode) and is forced `true` by callers whose ids came from a per-channel UULF→UU fallback,
+ * so a fallback never lets a Short reach a surface (PHASE_4_SPEC.md §6, D2).
+ */
+export async function enrich(
+  videoIds: string[],
+  opts: { filterShorts?: boolean } = {},
+): Promise<Video[]> {
+  const filterShorts = opts.filterShorts ?? !USE_UULF;
   const out: Video[] = [];
   for (let i = 0; i < videoIds.length; i += 50) {
     const batch = videoIds.slice(i, i + 50);
@@ -230,12 +349,12 @@ export async function enrich(videoIds: string[]): Promise<Video[]> {
         maxResults: "50",
       },
       VideosResponseSchema,
+      "videos.list",
     );
-    recordQuota("videos.list");
     for (const v of data.items) {
       const durationSec = parseISODuration(v.contentDetails?.duration || "");
-      // UU fallback: drop Shorts client-side when not already excluded by UULF.
-      if (!USE_UULF && isShort(durationSec)) continue;
+      // Drop Shorts client-side on any UU (full-uploads) path — global or per-channel fallback.
+      if (filterShorts && isShort(durationSec)) continue;
       const channelId = v.snippet?.channelId || "";
       // Category + tier are carried from the roster config (tier drives home composition).
       const category: Category = getCategoryOf(channelId) ?? "";
@@ -277,8 +396,8 @@ export async function getChannelMeta(channelIds: string[]): Promise<ChannelMeta[
         maxResults: "50",
       },
       ChannelsResponseSchema,
+      "channels.list",
     );
-    recordQuota("channels.list");
     for (const c of data.items) {
       out.push({
         channelId: c.id,
@@ -297,9 +416,15 @@ export async function getChannelMeta(channelIds: string[]): Promise<ChannelMeta[
   return out;
 }
 
-/** Convenience: enrich + join avatar urls from channel meta in one pass. */
-export async function enrichWithAvatars(videoIds: string[]): Promise<Video[]> {
-  const videos = await enrich(videoIds);
+/**
+ * Convenience: enrich + join avatar urls from channel meta in one pass. `opts.filterShorts`
+ * is forwarded to {@link enrich} so a per-channel UULF→UU fallback can force Shorts removal.
+ */
+export async function enrichWithAvatars(
+  videoIds: string[],
+  opts: { filterShorts?: boolean } = {},
+): Promise<Video[]> {
+  const videos = await enrich(videoIds, opts);
   const channelIds = [...new Set(videos.map((v) => v.channelId))];
   const metas = await getChannelMeta(channelIds);
   const avatarByChannel = new Map(metas.map((m) => [m.channelId, m.avatarUrl]));

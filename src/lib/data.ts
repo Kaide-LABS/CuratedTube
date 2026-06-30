@@ -4,12 +4,12 @@
 
 import "server-only";
 import { cache } from "react";
-import { getActiveByTier, getChannelConfig, resolveUploadsPlaylistId } from "./channels";
+import { getActiveByTier, getChannelConfig } from "./channels";
 import { pollUploads } from "./rss";
 import {
   enrichWithAvatars,
   getChannelMeta,
-  getUploads,
+  getChannelUploads,
   hasApiKey,
 } from "./youtube";
 import { sortVideos } from "./feed";
@@ -37,15 +37,22 @@ export const getHomeFeed = cache(async (): Promise<HomeFeed> => {
   // 1) Zero-quota detection across all channels (parallel).
   const polled = await Promise.all(channels.map((c) => pollUploads(c.uploadsPlaylistId)));
 
-  // 2) Collect recent ids; RSS-empty channels fall back to one Data API page.
+  // 2) Collect recent ids; RSS-empty channels fall back to one Data API page (with the
+  //    per-channel UULF→UU drill, so one broken UULF never blanks the feed — D2).
   const ids = new Set<string>();
+  let usedUUAnywhere = false;
   await Promise.all(
     channels.map(async (c, i) => {
       const entries = polled[i].slice(0, RSS_PER_CHANNEL);
       if (entries.length > 0) {
         for (const e of entries) ids.add(e.videoId);
       } else {
-        const refs = await getUploads(c.uploadsPlaylistId, { maxPages: 1, pageSize: RSS_PER_CHANNEL });
+        const { refs, usedUU } = await getChannelUploads(c.channelId, {
+          primaryPlaylistId: c.uploadsPlaylistId,
+          maxPages: 1,
+          pageSize: RSS_PER_CHANNEL,
+        });
+        if (usedUU) usedUUAnywhere = true;
         for (const r of refs) ids.add(r.videoId);
       }
     }),
@@ -53,8 +60,9 @@ export const getHomeFeed = cache(async (): Promise<HomeFeed> => {
 
   if (ids.size === 0) return { ready: true, videos: [] };
 
-  // 3) Enrich. Newest-first pool, capped; the client balances + filters.
-  const videos = await enrichWithAvatars([...ids]);
+  // 3) Enrich. Newest-first pool, capped; the client balances + filters. If any channel fell
+  //    back to UU, filter Shorts pool-wide — harmless for UULF ids (already long-form).
+  const videos = await enrichWithAvatars([...ids], { filterShorts: usedUUAnywhere });
   videos.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
   return { ready: true, videos: videos.slice(0, HOME_POOL_CAP) };
 });
@@ -70,11 +78,14 @@ export const getChannelArchive = cache(
     const cfg = getChannelConfig(channelId);
     if (!hasApiKey() || !cfg) return { meta: null, videos: [] };
 
-    const [metas, refs] = await Promise.all([
+    const [metas, uploads] = await Promise.all([
       getChannelMeta([channelId]),
-      getUploads(cfg.uploadsPlaylistId, { maxPages }),
+      getChannelUploads(channelId, { primaryPlaylistId: cfg.uploadsPlaylistId, maxPages }),
     ]);
-    const videos = await enrichWithAvatars(refs.map((r) => r.videoId));
+    const videos = await enrichWithAvatars(
+      uploads.refs.map((r) => r.videoId),
+      { filterShorts: uploads.usedUU },
+    );
     return { meta: metas[0] ?? null, videos: sortVideos(videos, sort) };
   },
 );
@@ -92,13 +103,18 @@ export const getWatchData = cache(async (videoId: string): Promise<WatchData> =>
   const [video] = await enrichWithAvatars([videoId]);
   if (!video) return { video: null, meta: null, rail: [] };
 
-  const uploadsPlaylistId = resolveUploadsPlaylistId(video.channelId);
-  const [metas, refs] = await Promise.all([
+  const cfg = getChannelConfig(video.channelId);
+  const [metas, uploads] = await Promise.all([
     getChannelMeta([video.channelId]),
-    getUploads(uploadsPlaylistId, { maxPages: 1, pageSize: 16 }),
+    getChannelUploads(video.channelId, {
+      primaryPlaylistId: cfg?.uploadsPlaylistId,
+      maxPages: 1,
+      pageSize: 16,
+    }),
   ]);
   const railVideos = await enrichWithAvatars(
-    refs.map((r) => r.videoId).filter((id) => id !== videoId).slice(0, 12),
+    uploads.refs.map((r) => r.videoId).filter((id) => id !== videoId).slice(0, 12),
+    { filterShorts: uploads.usedUU },
   );
 
   return { video, meta: metas[0] ?? null, rail: railVideos };
