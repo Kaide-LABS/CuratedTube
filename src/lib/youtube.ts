@@ -61,6 +61,15 @@ export function hasApiKey(): boolean {
 // when a unit is spent; this makes the Data-API-backed routes (home/channel/watch) render
 // per-request rather than ISR-static, which is the right trade for a single-user tool: quota is
 // held down by the 0-unit RSS detection path + these 304s, not by Next caching opaque payloads.
+// Transient-failure retry: a 2xx response can still carry an empty or truncated body — observed
+// under Next dev's instrumented fetch when a route compiles while requests are in flight, and
+// possible in production behind a flaky proxy or on a dropped keep-alive connection. `res.json()`
+// would throw `SyntaxError: Unexpected end of JSON input` on such a body and 500 the whole page,
+// so we retry a small, bounded number of times before surfacing the error.
+const MAX_API_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 200;
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function apiGet<T>(
   path: string,
   params: Record<string, string>,
@@ -89,30 +98,45 @@ async function apiFetch<T>(
   type: QuotaCallType,
 ): Promise<T> {
   const etag = getETag(cacheKey);
-  const res = await fetch(url, {
-    cache: "no-store",
-    headers: etag ? { "If-None-Match": etag } : undefined,
-  });
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: etag ? { "If-None-Match": etag } : undefined,
+    });
 
-  if (res.status === 304) {
-    recordConditional(type, true); // 0 units
-    const cached = getCachedBody<T>(cacheKey);
-    if (cached !== undefined) return cached;
-    // Defensive: a 304 without a cached body (ETag + body are written together, so this is
-    // effectively unreachable). Re-request unconditionally and pay the one unit.
-    return apiFetchUnconditional(url, cacheKey, label, schema, type);
+    if (res.status === 304) {
+      recordConditional(type, true); // 0 units
+      const cached = getCachedBody<T>(cacheKey);
+      if (cached !== undefined) return cached;
+      // Defensive: a 304 without a cached body (ETag + body are written together, so this is
+      // effectively unreachable). Re-request unconditionally and pay the one unit.
+      return apiFetchUnconditional(url, cacheKey, label, schema, type);
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`YouTube API ${label} ${res.status}: ${body.slice(0, 300)}`);
+    }
+
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      // Empty/truncated body on a 2xx (see MAX_API_ATTEMPTS note). Retry before surfacing, so a
+      // transient blank response degrades into a brief retry rather than a 500 that blanks the feed.
+      if (attempt < MAX_API_ATTEMPTS) {
+        await sleep(RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      throw new Error(`YouTube API ${label}: invalid/empty JSON response after ${attempt} attempts`);
+    }
+
+    const parsed = schema.parse(json);
+    const freshEtag = res.headers.get("ETag");
+    if (freshEtag) setCached(cacheKey, freshEtag, parsed);
+    recordConditional(type, false); // +COST[type]
+    return parsed;
   }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`YouTube API ${label} ${res.status}: ${body.slice(0, 300)}`);
-  }
-
-  const parsed = schema.parse(await res.json());
-  const freshEtag = res.headers.get("ETag");
-  if (freshEtag) setCached(cacheKey, freshEtag, parsed);
-  recordConditional(type, false); // +COST[type]
-  return parsed;
 }
 
 /** Unconditional re-fetch (no If-None-Match); used only on the unreachable 304-without-body path. */
@@ -123,16 +147,28 @@ async function apiFetchUnconditional<T>(
   schema: z.ZodType<T>,
   type: QuotaCallType,
 ): Promise<T> {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`YouTube API ${label} ${res.status}: ${body.slice(0, 300)}`);
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`YouTube API ${label} ${res.status}: ${body.slice(0, 300)}`);
+    }
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      if (attempt < MAX_API_ATTEMPTS) {
+        await sleep(RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      throw new Error(`YouTube API ${label}: invalid/empty JSON response after ${attempt} attempts`);
+    }
+    const parsed = schema.parse(json);
+    const freshEtag = res.headers.get("ETag");
+    if (freshEtag) setCached(cacheKey, freshEtag, parsed);
+    recordConditional(type, false);
+    return parsed;
   }
-  const parsed = schema.parse(await res.json());
-  const freshEtag = res.headers.get("ETag");
-  if (freshEtag) setCached(cacheKey, freshEtag, parsed);
-  recordConditional(type, false);
-  return parsed;
 }
 
 // ---------------------------------------------------------------------------
