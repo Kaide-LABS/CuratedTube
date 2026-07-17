@@ -108,10 +108,13 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
         videoId,
         playerVars: { ...PLAYER_VARS },
         events: {
-          // onError 101/150 (identical) + 153 => embedding restricted; show the link
-          // fallback rather than a blank player (PRD §5.3).
-          onError: (e) => {
-            if (e.data === 101 || e.data === 150 || e.data === 153) setErrored(true);
+          // Any player error (2 invalid id, 5 HTML5 failure, 100 removed/private, 101/150/153
+          // embedding restricted) => show the "Watch on YouTube" link instead of leaving YouTube's
+          // own cryptic error screen ("An error occurred… Playback ID …") in the iframe (PRD §5.3:
+          // never a blank/dead player). The direct link always works even when embedded playback
+          // fails (owner-disabled embedding, region/age lock, or a browser blocker of googlevideo).
+          onError: () => {
+            setErrored(true);
           },
           // Focus limiter only: open/extend an active segment while PLAYING, close it otherwise.
           // ENDED (data === 0) closes the segment and does NOTHING else — there is NO autoplay
