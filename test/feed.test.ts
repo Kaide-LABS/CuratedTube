@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { buildHomeFeed, sortVideos, DEFAULT_TIER_SLOTS, HOME_FEED_CAP } from "../src/lib/feed";
+import {
+  buildHomeFeed,
+  mergeAdditionVideos,
+  sortVideos,
+  DEFAULT_TIER_SLOTS,
+  HOME_FEED_CAP,
+} from "../src/lib/feed";
 import { DEFAULT_RANKING_CONFIG } from "../src/lib/ranking-config";
 import type { ImpressionState, RankContext, Tier, Video } from "../src/lib/types";
 
@@ -168,6 +174,54 @@ describe("buildHomeFeed — ranked mode (Phase 2)", () => {
     const feed = buildHomeFeed([...recent, ...old], DEFAULT_TIER_SLOTS, HOME_FEED_CAP, ctxOf());
     const oldShown = feed.filter((v) => v.videoId.startsWith("o")).length;
     expect(oldShown).toBe(3); // exactly the reserve, despite their low score
+  });
+});
+
+describe("mergeAdditionVideos — user channel additions overlay (add-channels-by-URL)", () => {
+  it("concatenates addition videos with the base pool, deduped by videoId", () => {
+    const base = mkVideos(1, 3, "base");
+    const additions = mkVideos(2, 2, "add");
+    const merged = mergeAdditionVideos(base, additions);
+    expect(merged).toHaveLength(5);
+    expect(merged.map((v) => v.videoId).sort()).toEqual(
+      [...base, ...additions].map((v) => v.videoId).sort(),
+    );
+  });
+
+  it("addition wins: a base video from a channel the user also added is dropped in favor of the addition copy", () => {
+    const sharedChannelId = "UCshared";
+    const baseVideo = { ...mkVideos(1, 1, "x")[0], channelId: sharedChannelId, videoId: "shared-vid" };
+    const additionVideo = { ...mkVideos(2, 1, "y")[0], channelId: sharedChannelId, videoId: "shared-vid" };
+    const merged = mergeAdditionVideos([baseVideo], [additionVideo]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].tier).toBe(2); // the addition's tier, not the base video's
+  });
+
+  it("with no additions, returns the base pool unchanged", () => {
+    const base = mkVideos(1, 4, "base");
+    expect(mergeAdditionVideos(base, [])).toEqual(base);
+  });
+});
+
+describe("buildHomeFeed with user channel additions present", () => {
+  it("still allocates exactly 15/9/0 when Tier-1/2 additions are merged into an abundant base pool", () => {
+    const base = [...mkVideos(1, 20, "b1"), ...mkVideos(2, 20, "b2")];
+    const additions = [...mkVideos(1, 5, "a1"), ...mkVideos(2, 5, "a2")];
+    const merged = mergeAdditionVideos(base, additions);
+    const feed = buildHomeFeed(merged);
+    expect(feed).toHaveLength(24);
+    expect(feed.filter((v) => v.tier === 1)).toHaveLength(15);
+    expect(feed.filter((v) => v.tier === 2)).toHaveLength(9);
+    expect(feed.filter((v) => v.tier === 3)).toHaveLength(0);
+  });
+
+  it("a Tier-3 addition gets ZERO home slots, same as baked Tier 3", () => {
+    const base = [...mkVideos(1, 2, "b1"), ...mkVideos(2, 2, "b2")];
+    const tier3Addition = mkVideos(3, 50, "a3"); // abundant, but tier 3
+    const merged = mergeAdditionVideos(base, tier3Addition);
+    const feed = buildHomeFeed(merged);
+    expect(feed.some((v) => v.tier === 3)).toBe(false);
+    expect(feed).toHaveLength(4); // only the 4 active-tier base videos are eligible
   });
 });
 

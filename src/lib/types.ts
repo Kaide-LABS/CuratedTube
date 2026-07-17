@@ -183,3 +183,43 @@ export type ChannelMeta = {
 };
 
 export type SortMode = "latest" | "popular" | "oldest";
+
+// --- User channel additions (IndexedDB overlay on the baked channels.json roster) ---------
+// Persisted client-side only (never written back to channels.json — Cloud Run's filesystem
+// is ephemeral). Tier is REQUIRED and restricted to 1|2|3 (no null/parked): the user must pick
+// an active tier explicitly before an addition can be saved, unlike a roster entry awaiting
+// classification. Shaped so it migrates cleanly to a per-user DB row later (no single-user
+// coupling beyond the IndexedDB store itself living in this browser).
+export const ChannelAdditionSchema = z.object({
+  channelId: z
+    .string()
+    .regex(/^UC[A-Za-z0-9_-]{22}$/),
+  handle: z.string(),
+  uploadsPlaylistId: z
+    .string()
+    .regex(/^(UULF|UU)[A-Za-z0-9_-]{22}$/),
+  title: z.string(),
+  avatarUrl: z.string(),
+  subscriberCount: z.number().int().nonnegative(),
+  category: z.string(),
+  tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  addedAt: z.string(), // ISO timestamp the user saved it
+});
+export type ChannelAddition = z.infer<typeof ChannelAdditionSchema>;
+
+// --- Resolve-candidate (POST /api/channels/resolve response; nothing persisted server-side) ---
+export const ChannelCandidateSchema = z.object({
+  channelId: z.string(),
+  handle: z.string(),
+  title: z.string(),
+  avatarUrl: z.string(),
+  subscriberCount: z.number().int().nonnegative(),
+  uploadsPlaylistId: z.string(),
+  longformCount: z.number().int().nonnegative(),
+  warnings: z.object({
+    duplicate: z.boolean(),
+    shortsOnly: z.boolean(),
+    usedUU: z.boolean(),
+  }),
+});
+export type ChannelCandidate = z.infer<typeof ChannelCandidateSchema>;

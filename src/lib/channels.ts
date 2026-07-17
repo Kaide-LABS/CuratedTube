@@ -108,3 +108,15 @@ export function getTierOf(channelId: string): Tier | undefined {
 export function isUnconfigured(): boolean {
   return getChannels().length === 0;
 }
+
+/**
+ * Duplicate check for the add-channels-by-URL resolve candidate: true when `channelId` is
+ * already in the baked roster (any tier, including parked) OR in the caller-supplied set of
+ * existing user additions. Pure predicate — the caller supplies `existingIds` since user
+ * additions live in the browser's IndexedDB, invisible to this server-side module.
+ */
+export function isDuplicateChannelId(channelId: string, existingIds: Iterable<string>): boolean {
+  if (ROSTER.channels.some((c) => c.channelId === channelId)) return true;
+  for (const id of existingIds) if (id === channelId) return true;
+  return false;
+}

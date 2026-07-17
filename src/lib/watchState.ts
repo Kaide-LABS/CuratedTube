@@ -1,19 +1,21 @@
 // Client-only personal state in IndexedDB (PRD D3, §9.7; PHASE_2_SPEC §5, PHASE_3_SPEC §5).
 // Single-user, no backend. v1 stored watch state (visited videos) to de-emphasize watched cards.
-// v2 added an `impressions` store (anti-repetition signal for the Phase 2 ranker). v3 adds the
-// `watchLater` and `session` stores (Phase 3). This module owns the SINGLE DB-open path and the
-// full schema; watchLater.ts and sessionStore.ts reuse the exported `openDB`/`tx`. Every migration
-// is additive and idempotent from a fresh state (v1, v2, or v3).
+// v2 added an `impressions` store (anti-repetition signal for the Phase 2 ranker). v3 added the
+// `watchLater` and `session` stores (Phase 3). v4 adds `userChannels` (add-channels-by-URL
+// overlay). This module owns the SINGLE DB-open path and the full schema; watchLater.ts,
+// sessionStore.ts, and userChannels.ts reuse the exported `openDB`/`tx`. Every migration is
+// additive and idempotent from a fresh state (v1 through v4).
 "use client";
 
 import type { ImpressionState, WatchState } from "./types";
 
 const DB_NAME = "curatedtube";
-const DB_VERSION = 3; // v2 -> v3: add `watchLater` + `session` (watchState/impressions preserved)
+const DB_VERSION = 4; // v3 -> v4: add `userChannels` (watchState/impressions/watchLater/session preserved)
 const WATCH_STORE = "watchState";
 const IMPRESSION_STORE = "impressions";
 const WATCH_LATER_STORE = "watchLater";
 const SESSION_STORE = "session";
+const USER_CHANNELS_STORE = "userChannels";
 
 /**
  * Open (and migrate) the shared `curatedtube` IndexedDB. The single DB-open path for every
@@ -43,6 +45,9 @@ export function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SESSION_STORE)) {
         db.createObjectStore(SESSION_STORE, { keyPath: "startedAt" });
+      }
+      if (!db.objectStoreNames.contains(USER_CHANNELS_STORE)) {
+        db.createObjectStore(USER_CHANNELS_STORE, { keyPath: "channelId" });
       }
     };
     req.onsuccess = () => resolve(req.result);

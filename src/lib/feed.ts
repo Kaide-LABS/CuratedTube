@@ -139,6 +139,25 @@ function buildRanked(videos: Video[], slots: TierSlots, cap: number, ctx: RankCo
   return chosen.sort(byScore).slice(0, cap);
 }
 
+/**
+ * Merge user-added-channel videos into the base pool (user channels feature). "Addition wins":
+ * any base-pool video whose channel was also user-added is dropped in favor of the addition's
+ * (freshly tagged tier/category) copy, then the two sets are deduped by videoId. Pure so the
+ * 15/9/0 tier allocation with additions present is unit-testable without any network.
+ */
+export function mergeAdditionVideos(basePool: Video[], additionVideos: Video[]): Video[] {
+  const additionChannelIds = new Set(additionVideos.map((v) => v.channelId));
+  const filteredBase = basePool.filter((v) => !additionChannelIds.has(v.channelId));
+  const seen = new Set<string>();
+  const merged: Video[] = [];
+  for (const v of [...additionVideos, ...filteredBase]) {
+    if (seen.has(v.videoId)) continue;
+    seen.add(v.videoId);
+    merged.push(v);
+  }
+  return merged;
+}
+
 /** Channel-archive sort (PRD §5.2). */
 export function sortVideos(videos: Video[], mode: "latest" | "popular" | "oldest"): Video[] {
   const v = [...videos];

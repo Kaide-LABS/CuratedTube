@@ -438,22 +438,53 @@ export async function getChannelMeta(channelIds: string[]): Promise<ChannelMeta[
       ChannelsResponseSchema,
       "channels.list",
     );
-    for (const c of data.items) {
-      out.push({
-        channelId: c.id,
-        title: c.snippet?.title || "",
-        handle: c.snippet?.customUrl || "",
-        avatarUrl: bestThumb(c.snippet?.thumbnails),
-        bannerUrl: c.brandingSettings?.image?.bannerExternalUrl || null,
-        subscriberCount: Number(c.statistics?.subscriberCount || 0),
-        hiddenSubscriberCount: Boolean(c.statistics?.hiddenSubscriberCount),
-        description: c.snippet?.description || "",
-        category: getCategoryOf(c.id) ?? "",
-        tier: getTierOf(c.id) ?? null,
-      });
-    }
+    for (const c of data.items) out.push(metaFromChannelItem(c));
   }
   return out;
+}
+
+function metaFromChannelItem(item: ChannelsResponse["items"][number]): ChannelMeta {
+  return {
+    channelId: item.id,
+    title: item.snippet?.title || "",
+    handle: item.snippet?.customUrl || "",
+    avatarUrl: bestThumb(item.snippet?.thumbnails),
+    bannerUrl: item.brandingSettings?.image?.bannerExternalUrl || null,
+    subscriberCount: Number(item.statistics?.subscriberCount || 0),
+    hiddenSubscriberCount: Boolean(item.statistics?.hiddenSubscriberCount),
+    description: item.snippet?.description || "",
+    category: getCategoryOf(item.id) ?? "",
+    tier: getTierOf(item.id) ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// resolveChannelByHandle / resolveChannelByUsername — user-added-channels lookup.
+// channels.list?forHandle= / ?forUsername=, 1 unit. NEVER search.list (D4).
+// ---------------------------------------------------------------------------
+
+/** Resolve a channel by its @handle (channels.list?forHandle=). Null if no match. */
+export async function resolveChannelByHandle(handle: string): Promise<ChannelMeta | null> {
+  const data = await apiGet<ChannelsResponse>(
+    "channels",
+    { part: "snippet,statistics,brandingSettings", forHandle: handle },
+    ChannelsResponseSchema,
+    "channels.list",
+  );
+  const item = data.items[0];
+  return item ? metaFromChannelItem(item) : null;
+}
+
+/** Resolve a channel by its legacy username (channels.list?forUsername=). Null if no match. */
+export async function resolveChannelByUsername(username: string): Promise<ChannelMeta | null> {
+  const data = await apiGet<ChannelsResponse>(
+    "channels",
+    { part: "snippet,statistics,brandingSettings", forUsername: username },
+    ChannelsResponseSchema,
+    "channels.list",
+  );
+  const item = data.items[0];
+  return item ? metaFromChannelItem(item) : null;
 }
 
 /**

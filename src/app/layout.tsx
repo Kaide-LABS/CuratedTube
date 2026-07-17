@@ -39,6 +39,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               >
                 Watch Later
               </Link>
+              <Link
+                href="/channels"
+                className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Channels
+              </Link>
               <InstallPrompt />
               <QuotaBadge />
             </div>

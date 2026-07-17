@@ -13,10 +13,64 @@ import {
   hasApiKey,
 } from "./youtube";
 import { sortVideos } from "./feed";
-import type { ChannelMeta, SortMode, Video } from "./types";
+import type { ChannelAddition, ChannelMeta, SortMode, Tier, Video } from "./types";
 
 const RSS_PER_CHANNEL = 12; // newest uploads to consider per channel for the home feed
 const HOME_POOL_CAP = 150; // upper bound on enriched videos serialized to the client
+
+type FeedChannel = { channelId: string; uploadsPlaylistId: string; tier: Tier; category: string };
+
+/**
+ * Shared RSS-primary (0 quota) + Data-API-fallback pipeline for a list of channels: poll each
+ * channel's uploads feed, fall back per-channel to one Data API page when RSS is empty (D2's
+ * UULF→UU drill lives inside getChannelUploads), enrich, and tag each video with the tier/
+ * category of the channel it came from. The tag is an explicit overwrite (not a channels.json
+ * lookup) so it works identically for base roster channels and user-added channels, which have
+ * no channels.json entry for enrich()'s getTierOf/getCategoryOf to find.
+ */
+async function buildVideosForChannels(channels: FeedChannel[]): Promise<{
+  videos: Video[];
+  usedUUAnywhere: boolean;
+}> {
+  if (channels.length === 0) return { videos: [], usedUUAnywhere: false };
+
+  const polled = await Promise.all(channels.map((c) => pollUploads(c.uploadsPlaylistId)));
+
+  const ids = new Set<string>();
+  const channelOf = new Map<string, FeedChannel>();
+  let usedUUAnywhere = false;
+  await Promise.all(
+    channels.map(async (c, i) => {
+      const entries = polled[i].slice(0, RSS_PER_CHANNEL);
+      if (entries.length > 0) {
+        for (const e of entries) {
+          ids.add(e.videoId);
+          channelOf.set(e.videoId, c);
+        }
+      } else {
+        const { refs, usedUU } = await getChannelUploads(c.channelId, {
+          primaryPlaylistId: c.uploadsPlaylistId,
+          maxPages: 1,
+          pageSize: RSS_PER_CHANNEL,
+        });
+        if (usedUU) usedUUAnywhere = true;
+        for (const r of refs) {
+          ids.add(r.videoId);
+          channelOf.set(r.videoId, c);
+        }
+      }
+    }),
+  );
+
+  if (ids.size === 0) return { videos: [], usedUUAnywhere };
+
+  const videos = await enrichWithAvatars([...ids], { filterShorts: usedUUAnywhere });
+  const tagged = videos.map((v) => {
+    const c = channelOf.get(v.videoId);
+    return c ? { ...v, tier: c.tier, category: c.category } : v;
+  });
+  return { videos: tagged, usedUUAnywhere };
+}
 
 export type HomeFeed = {
   ready: boolean; // false => show setup state (no key or no resolved channels)
@@ -34,38 +88,33 @@ export const getHomeFeed = cache(async (): Promise<HomeFeed> => {
   if (!hasApiKey()) return { ready: false, reason: "no-api-key", videos: [] };
   if (channels.length === 0) return { ready: false, reason: "no-channels", videos: [] };
 
-  // 1) Zero-quota detection across all channels (parallel).
-  const polled = await Promise.all(channels.map((c) => pollUploads(c.uploadsPlaylistId)));
+  const { videos } = await buildVideosForChannels(channels);
+  if (videos.length === 0) return { ready: true, videos: [] };
 
-  // 2) Collect recent ids; RSS-empty channels fall back to one Data API page (with the
-  //    per-channel UULF→UU drill, so one broken UULF never blanks the feed — D2).
-  const ids = new Set<string>();
-  let usedUUAnywhere = false;
-  await Promise.all(
-    channels.map(async (c, i) => {
-      const entries = polled[i].slice(0, RSS_PER_CHANNEL);
-      if (entries.length > 0) {
-        for (const e of entries) ids.add(e.videoId);
-      } else {
-        const { refs, usedUU } = await getChannelUploads(c.channelId, {
-          primaryPlaylistId: c.uploadsPlaylistId,
-          maxPages: 1,
-          pageSize: RSS_PER_CHANNEL,
-        });
-        if (usedUU) usedUUAnywhere = true;
-        for (const r of refs) ids.add(r.videoId);
-      }
-    }),
-  );
-
-  if (ids.size === 0) return { ready: true, videos: [] };
-
-  // 3) Enrich. Newest-first pool, capped; the client balances + filters. If any channel fell
-  //    back to UU, filter Shorts pool-wide — harmless for UULF ids (already long-form).
-  const videos = await enrichWithAvatars([...ids], { filterShorts: usedUUAnywhere });
   videos.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
   return { ready: true, videos: videos.slice(0, HOME_POOL_CAP) };
 });
+
+/**
+ * Videos for the user's IndexedDB channel additions (PRD: "add channels by URL" overlay).
+ * Tier-3 additions are excluded up front — they get zero home slots, same as baked Tier 3,
+ * so their uploads are never even fetched here (saves quota, not just feed slots). Not
+ * `cache()`-memoized: the addition set differs per request (POSTed by the client), so there
+ * is nothing stable for React's per-request cache key to dedupe against.
+ */
+export async function getAdditionVideos(additions: ChannelAddition[]): Promise<Video[]> {
+  if (!hasApiKey()) return [];
+  const channels: FeedChannel[] = additions
+    .filter((a) => a.tier === 1 || a.tier === 2)
+    .map((a) => ({
+      channelId: a.channelId,
+      uploadsPlaylistId: a.uploadsPlaylistId,
+      tier: a.tier,
+      category: a.category,
+    }));
+  const { videos } = await buildVideosForChannels(channels);
+  return videos;
+}
 
 export type ChannelArchive = {
   meta: ChannelMeta | null;

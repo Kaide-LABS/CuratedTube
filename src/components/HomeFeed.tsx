@@ -2,14 +2,18 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ImpressionState, RankContext, Video } from "@/lib/types";
-import { buildHomeFeed, sortVideos, HOME_FEED_CAP } from "@/lib/feed";
+import { VideoSchema } from "@/lib/types";
+import { buildHomeFeed, mergeAdditionVideos, sortVideos, HOME_FEED_CAP } from "@/lib/feed";
 import { DEFAULT_RANKING_CONFIG } from "@/lib/ranking-config";
 import { getImpressionMap, getWatchSignals, recordImpressions } from "@/lib/watchState";
+import { getUserChannels } from "@/lib/userChannels";
+import { z } from "zod";
 import { CategoryFilterBar, type CategoryOption } from "./CategoryFilterBar";
 import { VideoPreviewCard } from "./VideoPreviewCard";
 import { CaughtUpBlocker } from "./CaughtUpBlocker";
 
 const STORAGE_KEY = "ct:home:category";
+const AdditionVideosResponseSchema = z.object({ videos: z.array(VideoSchema) });
 
 /**
  * Home Focus Feed (PHASE_2_SPEC §6). The "All" view is the full Phase 2 ranking — S₁ gravity
@@ -18,11 +22,20 @@ const STORAGE_KEY = "ct:home:category";
  * stays newest-first. Either way the grid is finite (≤24) and ends in the caught-up block.
  */
 export function HomeFeed({ pool }: { pool: Video[] }) {
-  // Distinct categories present in the (Tier 1∪2) pool, for the filter pills.
+  const [additionVideos, setAdditionVideos] = useState<Video[]>([]);
+  // The effective pool = base (server-rendered) + user channel additions (IndexedDB overlay,
+  // client-only — the server can't see it on the initial render). Merged AFTER mount for the
+  // same hydration-mismatch reason as the ranking signals below.
+  const effectivePool = useMemo(
+    () => mergeAdditionVideos(pool, additionVideos),
+    [pool, additionVideos],
+  );
+
+  // Distinct categories present in the effective pool, for the filter pills.
   const options = useMemo<CategoryOption[]>(() => {
-    const present = [...new Set(pool.map((v) => v.category))].filter(Boolean).sort();
+    const present = [...new Set(effectivePool.map((v) => v.category))].filter(Boolean).sort();
     return ["All", ...present];
-  }, [pool]);
+  }, [effectivePool]);
 
   const [selected, setSelected] = useState<CategoryOption>("All");
   const [visited, setVisited] = useState<Set<string>>(new Set());
@@ -60,6 +73,32 @@ export function HomeFeed({ pool }: { pool: Video[] }) {
     };
   }, []);
 
+  // User channel additions (IndexedDB overlay): read the client's additions, POST them to the
+  // server for the same RSS/Data-API build the base feed uses (the API key never reaches the
+  // client), then merge the returned videos into the pool. Skips the round trip entirely when
+  // there are no additions.
+  useEffect(() => {
+    let alive = true;
+    getUserChannels().then(async (additions) => {
+      if (!alive || additions.length === 0) return;
+      try {
+        const res = await fetch("/api/feed/additions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ additions }),
+        });
+        if (!res.ok) return;
+        const parsed = AdditionVideosResponseSchema.parse(await res.json());
+        if (alive) setAdditionVideos(parsed.videos);
+      } catch {
+        /* addition videos are additive; a failed fetch just leaves the base pool as-is */
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const ctx = useMemo<RankContext>(
     () => ({ now, visited, impressions, config: DEFAULT_RANKING_CONFIG }),
     [now, visited, impressions],
@@ -70,14 +109,14 @@ export function HomeFeed({ pool }: { pool: Video[] }) {
   const view = useMemo(() => {
     if (selected !== "All") {
       return sortVideos(
-        pool.filter((v) => v.category === selected),
+        effectivePool.filter((v) => v.category === selected),
         "latest",
       ).slice(0, HOME_FEED_CAP);
     }
     return mounted
-      ? buildHomeFeed(pool, undefined, HOME_FEED_CAP, ctx)
-      : buildHomeFeed(pool, undefined, HOME_FEED_CAP);
-  }, [pool, selected, mounted, ctx]);
+      ? buildHomeFeed(effectivePool, undefined, HOME_FEED_CAP, ctx)
+      : buildHomeFeed(effectivePool, undefined, HOME_FEED_CAP);
+  }, [effectivePool, selected, mounted, ctx]);
 
   // Anti-repetition: record an impression for the ranked videos actually shown (idempotent per
   // session). Only the "All" view feeds the cross-session penalty; category browsing does not.
