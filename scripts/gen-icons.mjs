@@ -1,6 +1,6 @@
 // Generate the PWA / home-screen icons (PHASE_3_SPEC.md §1/§6) with no third-party deps.
-// Draws the CuratedTube "C" mark (zinc-100 ring with a right-facing opening) on the zinc-950
-// background and emits valid 8-bit RGBA PNGs. Run: `node scripts/gen-icons.mjs`.
+// Draws the HalalTube "H" mark (zinc-100 monogram — two vertical bars + a crossbar) on the
+// zinc-950 background and emits valid 8-bit RGBA PNGs. Run: `node scripts/gen-icons.mjs`.
 import { deflateSync } from "node:zlib";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -33,23 +33,25 @@ function chunk(type, data) {
   return Buffer.concat([len, body, crc]);
 }
 
+// The "H" monogram: two vertical bars joined by a centered crossbar, in normalized coords.
+function inMark(x, y, size) {
+  const nx = (x + 0.5) / size;
+  const ny = (y + 0.5) / size;
+  const inVert = ny >= 0.28 && ny <= 0.72;
+  const leftBar = inVert && nx >= 0.3 && nx <= 0.42;
+  const rightBar = inVert && nx >= 0.58 && nx <= 0.7;
+  const crossBar = ny >= 0.455 && ny <= 0.545 && nx >= 0.3 && nx <= 0.7;
+  return leftBar || rightBar || crossBar;
+}
+
 function makePng(size) {
-  const cx = size / 2;
-  const cy = size / 2;
-  const rOuter = size * 0.4;
-  const rInner = size * 0.26;
   // Raw RGBA scanlines, each prefixed with a 0 (none) filter byte.
   const raw = Buffer.alloc(size * (size * 4 + 1));
   let p = 0;
   for (let y = 0; y < size; y++) {
     raw[p++] = 0; // filter: none
     for (let x = 0; x < size; x++) {
-      const dx = x + 0.5 - cx;
-      const dy = y + 0.5 - cy;
-      const dist = Math.hypot(dx, dy);
-      const angle = Math.atan2(dy, dx); // 0 = facing right (the "C" opening)
-      const inRing = dist >= rInner && dist <= rOuter && Math.abs(angle) > 0.55;
-      const [r, g, b] = inRing ? FG : BG;
+      const [r, g, b] = inMark(x, y, size) ? FG : BG;
       raw[p++] = r;
       raw[p++] = g;
       raw[p++] = b;

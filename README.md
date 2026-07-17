@@ -1,9 +1,9 @@
-# CuratedTube
+# HalalTube
 
 A personal, single-user, focus-oriented scoped YouTube client.
 **North star: keep the discovery, kill the rabbit hole.** Block YouTube everywhere; lose only the distraction.
 
-CuratedTube reproduces YouTube's *useful* surfaces — a discovery feed, channel pages, a watch page, sort/filter — restricted to ~20 whitelisted channels, with the addictive surfaces (Shorts, comments, autoplay chains, open recommendations, global search) removed at the architecture level.
+HalalTube reproduces YouTube's *useful* surfaces — a discovery feed, channel pages, a watch page, sort/filter — restricted to ~20 whitelisted channels, with the addictive surfaces (Shorts, comments, autoplay chains, open recommendations, global search) removed at the architecture level.
 
 ## Stack
 
@@ -72,5 +72,5 @@ src/app/        Home (/), Channel (/channel/[id]), Watch (/watch/[id]), /api/quo
 scripts/        resolve-channels.mjs (one-time handle -> id resolution)
 ```
 
-See `CuratedTube_PRD.md` (build spec) and `CuratedTube_context.md` (research grounding).
+See `HalalTube_PRD.md` (build spec) and `HalalTube_context.md` (research grounding).
 Phase status and what's left: `HANDOFF.md`.

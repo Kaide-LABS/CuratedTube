@@ -95,7 +95,7 @@ export function InstallPrompt() {
             <p className="mt-2 text-sm text-zinc-400">
               In Safari, tap the Share button, then choose{" "}
               <span className="font-medium text-zinc-200">Add to Home Screen</span> to install
-              CuratedTube.
+              HalalTube.
             </p>
             <button
               type="button"

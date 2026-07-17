@@ -5,7 +5,7 @@
 // script/style ('unsafe-inline') because the Next.js App Router injects inline bootstrap/hydration
 // scripts without a nonce; a nonce-based tightening would require request middleware and is a
 // candidate future hardening, not part of this deploy step. The policy DOES restrict framing and
-// connections to exactly what CuratedTube needs: the YouTube IFrame player and its asset host.
+// connections to exactly what HalalTube needs: the YouTube IFrame player and its asset host.
 const csp = [
   "default-src 'self'",
   // Next inline bootstrap + the YouTube IFrame API (www.youtube.com) and its widget host (s.ytimg.com).
@@ -39,6 +39,9 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
+  // Self-contained server bundle for containerized deploy (Cloud Run). Emits .next/standalone
+  // with a minimal node server + traced deps; the Dockerfile copies that + .next/static + public/.
+  output: "standalone",
   images: {
     // YouTube thumbnail + avatar hosts. NOTE: the feed renders thumbnails/avatars as plain <img>
     // (VideoPreviewCard), so these patterns are not what gates them today (CSP img-src does) — they

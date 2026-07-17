@@ -5,8 +5,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "CuratedTube",
-    short_name: "CuratedTube",
+    name: "HalalTube",
+    short_name: "HalalTube",
     description:
       "Keep the discovery, kill the rabbit hole. A focus-oriented scoped YouTube client.",
     start_url: "/",

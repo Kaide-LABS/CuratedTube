@@ -1,6 +1,6 @@
-# CuratedTube — Deployment & Block-YouTube Runbook
+# HalalTube — Deployment & Block-YouTube Runbook
 
-Phase 4 (Hardening) deployment guide. CuratedTube is a single-user, server-rendered Next.js
+Phase 4 (Hardening) deployment guide. HalalTube is a single-user, server-rendered Next.js
 (App Router) app. The only secret is the YouTube Data API key, which stays **server-side**.
 
 ---
@@ -31,7 +31,7 @@ Phase 4 (Hardening) deployment guide. CuratedTube is a single-user, server-rende
 
 Headers are defined once in [`next.config.mjs`](next.config.mjs) (`headers()`), so there is no
 conflicting policy. The CSP permits the YouTube IFrame player (`frame-src https://www.youtube.com`)
-and its API/asset hosts, blocks framing of CuratedTube itself (`frame-ancestors 'none'`), and ships
+and its API/asset hosts, blocks framing of HalalTube itself (`frame-ancestors 'none'`), and ships
 `nosniff`, `Referrer-Policy`, `HSTS`, and a locked-down `Permissions-Policy`. `script-src`/`style-src`
 keep `'unsafe-inline'` because the App Router emits inline hydration scripts without a nonce; a
 nonce-based tightening (request middleware) is a candidate future hardening, intentionally out of
@@ -55,20 +55,20 @@ scope for this deploy step.
 
 ## 4. Block YouTube across your devices
 
-Once CuratedTube is live and pinned, remove the rabbit hole at the source:
+Once HalalTube is live and pinned, remove the rabbit hole at the source:
 
 - **Router / DNS:** block `youtube.com`, `m.youtube.com`, `youtubei.googleapis.com` at your router
-  or via a DNS sink (Pi-hole / NextDNS). CuratedTube’s **player iframe still works** because it loads
+  or via a DNS sink (Pi-hole / NextDNS). HalalTube’s **player iframe still works** because it loads
   from `www.youtube.com` *embedded* — if you sink the whole domain, allowlist `www.youtube.com` and
   `*.googlevideo.com` (playback), and block the `/feed`, `/shorts`, `/results` browse paths instead.
 - **iOS / Android:** Screen Time / Digital Wellbeing → block the YouTube app + `youtube.com` in the
-  browser; add CuratedTube to the Home Screen (PWA) as the sanctioned entry point.
+  browser; add HalalTube to the Home Screen (PWA) as the sanctioned entry point.
 - **Desktop:** a hosts-file entry or an extension that blocks the YouTube homepage/Shorts/search while
   leaving `/watch` embeds intact.
 
 ## 5. iOS PWA storage — [VERIFY] closed (PRD §10, non-blocking)
 
-WebKit evicts a standalone PWA's IndexedDB after ~7 days of non-use. CuratedTube's IndexedDB holds
+WebKit evicts a standalone PWA's IndexedDB after ~7 days of non-use. HalalTube's IndexedDB holds
 only **convenience** state — watch history (visited de-emphasis), Watch Later, and session segments —
 none of it a source of truth. The feed, channel archives, and watch data **re-derive from the Data
 API** on open, so eviction costs at most some "visited" dimming and saved-later entries; nothing

@@ -1,0 +1,19 @@
+# Never ship secrets, VCS, build caches, or host node_modules into the image.
+.env
+.env.*
+!.env.example
+node_modules
+.next
+.git
+.gitignore
+coverage
+.venv
+.venv-1
+npm-debug.log*
+Dockerfile
+.dockerignore
+vercel.json
+*.md
+tsconfig.tsbuildinfo
+.vscode
+.claude
