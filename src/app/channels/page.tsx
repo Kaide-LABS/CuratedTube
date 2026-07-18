@@ -45,8 +45,13 @@ function subCount(n: number): string {
 /**
  * Channel Library — the app's "subscriptions" page. ONE surface: browse the effective roster
  * (baked channels.json + IndexedDB user additions, addition wins), add a channel by URL, remove
- * an addition, and classify a parked channel. Never linked from the home feed body — only from
- * the header nav, same as Watch Later.
+ * any channel (base or added), and classify a parked channel. Never linked from the home feed
+ * body — only from the header nav, same as Watch Later.
+ *
+ * "Remove" is a single verb in the UI regardless of source, but the mechanism it triggers still
+ * differs: an added channel is hard-deleted (nothing to restore); a base channel gets a
+ * reversible suppression record, restorable from the tucked-away "Recently removed" drawer at
+ * the bottom of the page — not an always-visible section.
  */
 export default function ChannelsPage() {
   const [baseRows, setBaseRows] = useState<RosterRow[]>([]);
@@ -55,6 +60,7 @@ export default function ChannelsPage() {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState<Record<string, number>>({});
+  const [toast, setToast] = useState<string | null>(null);
 
   // Add-by-URL flow (unchanged from the original add-channels-by-URL feature).
   const [url, setUrl] = useState("");
@@ -90,9 +96,10 @@ export default function ChannelsPage() {
     [baseRows, additions, suppressedIds],
   );
 
-  // Hidden base channels: their original base rows, kept around (unlike the effective roster)
-  // so the "Hidden channels" section can still show what they were and offer an Un-hide action.
-  const hiddenBaseRows = useMemo(() => {
+  // Recently removed base channels: their original base rows, kept around (unlike the effective
+  // roster) so the tucked-away "Recently removed" drawer can still show what they were and offer
+  // a Restore action. An added channel is hard-deleted on removal and never appears here.
+  const recentlyRemovedRows = useMemo(() => {
     const suppressed = new Set(suppressedIds);
     const addedIds = new Set(additions.map((a) => a.channelId));
     return baseRows.filter((r) => suppressed.has(r.channelId) && !addedIds.has(r.channelId));
@@ -177,8 +184,9 @@ export default function ChannelsPage() {
     }
   }
 
-  // Base channel -> reversible suppression overlay (Un-hide restores it). Added channel -> hard
-  // delete of its userChannels record (already worked before this feature).
+  // The user sees one verb everywhere ("Remove"); the mechanism underneath still differs — an
+  // added channel is hard-deleted (nothing to restore), a base channel gets a reversible
+  // suppression record (restorable from "Recently removed").
   async function onRemove(row: RosterRow): Promise<void> {
     if (row.source === "added") {
       await removeUserChannel(row.channelId);
@@ -186,10 +194,12 @@ export default function ChannelsPage() {
     } else {
       await suppressChannel(row.channelId);
       refreshSuppressed();
+      setToast("Removed — restore from Recently removed below.");
+      setTimeout(() => setToast(null), 4000);
     }
   }
 
-  async function onUnhide(channelId: string): Promise<void> {
+  async function onRestore(channelId: string): Promise<void> {
     await unsuppressChannel(channelId);
     refreshSuppressed();
   }
@@ -379,33 +389,52 @@ export default function ChannelsPage() {
             </button>
           )}
         </section>
+      </div>
 
-        {hiddenBaseRows.length > 0 && (
-          <section>
-            <h2 className="text-sm font-semibold text-zinc-100">
-              Hidden channels{" "}
-              <span className="font-normal text-zinc-500">({hiddenBaseRows.length})</span>
-            </h2>
-            <p className="mt-0.5 text-xs text-zinc-500">
-              Removed base channels — reversible. Un-hide to restore.
-            </p>
+      {/* Tucked away, not an always-visible roster-like section — a collapsed drawer at the
+          very bottom of the library, same affordance as "Add a channel" above. */}
+      <details className="mt-10 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-zinc-100">
+          Recently removed{" "}
+          {recentlyRemovedRows.length > 0 && (
+            <span className="font-normal text-zinc-500">({recentlyRemovedRows.length})</span>
+          )}
+        </summary>
+
+        {recentlyRemovedRows.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500">Nothing removed yet.</p>
+        ) : (
+          <>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {hiddenBaseRows.slice(0, visibleCount["hidden"] ?? PAGE_SIZE).map((row) => (
-                <HiddenCard key={row.channelId} row={row} onUnhide={() => void onUnhide(row.channelId)} />
+              {recentlyRemovedRows.slice(0, visibleCount["removed"] ?? PAGE_SIZE).map((row) => (
+                <RecentlyRemovedCard
+                  key={row.channelId}
+                  row={row}
+                  onRestore={() => void onRestore(row.channelId)}
+                />
               ))}
             </div>
-            {hiddenBaseRows.length > (visibleCount["hidden"] ?? PAGE_SIZE) && (
+            {recentlyRemovedRows.length > (visibleCount["removed"] ?? PAGE_SIZE) && (
               <button
                 type="button"
-                onClick={() => showMore("hidden")}
+                onClick={() => showMore("removed")}
                 className="mt-3 rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
               >
                 Show more
               </button>
             )}
-          </section>
+          </>
         )}
-      </div>
+      </details>
+
+      {toast && (
+        <div
+          role="status"
+          className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-xs text-zinc-200 shadow-lg"
+        >
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
@@ -545,14 +574,14 @@ function ChannelCard({
           onClick={onRemove}
           className="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
         >
-          {row.source === "added" ? "Remove" : "Hide"}
+          Remove
         </button>
       </div>
     </div>
   );
 }
 
-function HiddenCard({ row, onUnhide }: { row: RosterRow; onUnhide: () => void }) {
+function RecentlyRemovedCard({ row, onRestore }: { row: RosterRow; onRestore: () => void }) {
   return (
     <div className="rounded-xl border border-zinc-900 bg-zinc-950/60 p-3 opacity-70">
       <Link href={`/channel/${row.channelId}`} className="flex items-center gap-3">
@@ -571,10 +600,10 @@ function HiddenCard({ row, onUnhide }: { row: RosterRow; onUnhide: () => void })
       </Link>
       <button
         type="button"
-        onClick={onUnhide}
+        onClick={onRestore}
         className="mt-2 w-full rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
       >
-        Un-hide
+        Restore
       </button>
     </div>
   );
