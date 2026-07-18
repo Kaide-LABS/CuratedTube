@@ -13,11 +13,7 @@ import {
 } from "@/lib/types";
 import { mergeRosterRows, promoteParkedRow } from "@/lib/channels";
 import { addUserChannel, getUserChannels, removeUserChannel } from "@/lib/userChannels";
-import {
-  getSuppressedChannels,
-  suppressChannel,
-  unsuppressChannel,
-} from "@/lib/suppressedChannels";
+import { getSuppressedChannels, suppressChannel } from "@/lib/suppressedChannels";
 
 const ErrorResponseSchema = z.object({ error: z.string() });
 const RosterResponseSchema = z.object({ rows: z.array(RosterRowSchema) });
@@ -49,9 +45,10 @@ function subCount(n: number): string {
  * body — only from the header nav, same as Watch Later.
  *
  * "Remove" is a single verb in the UI regardless of source, but the mechanism it triggers still
- * differs: an added channel is hard-deleted (nothing to restore); a base channel gets a
- * reversible suppression record, restorable from the tucked-away "Recently removed" drawer at
- * the bottom of the page — not an always-visible section.
+ * differs: an added channel is hard-deleted; a base channel gets a suppression record (still
+ * reversible under the hood — see suppressedChannels.ts — but there is no in-app restore UI;
+ * re-adding the same channel by URL is the only way back, and that already overrides a prior
+ * suppression via mergeRosterRows's "addition wins" precedence).
  */
 export default function ChannelsPage() {
   const [baseRows, setBaseRows] = useState<RosterRow[]>([]);
@@ -95,15 +92,6 @@ export default function ChannelsPage() {
     () => mergeRosterRows(baseRows, additions, suppressedIds),
     [baseRows, additions, suppressedIds],
   );
-
-  // Recently removed base channels: their original base rows, kept around (unlike the effective
-  // roster) so the tucked-away "Recently removed" drawer can still show what they were and offer
-  // a Restore action. An added channel is hard-deleted on removal and never appears here.
-  const recentlyRemovedRows = useMemo(() => {
-    const suppressed = new Set(suppressedIds);
-    const addedIds = new Set(additions.map((a) => a.channelId));
-    return baseRows.filter((r) => suppressed.has(r.channelId) && !addedIds.has(r.channelId));
-  }, [baseRows, suppressedIds, additions]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -185,8 +173,9 @@ export default function ChannelsPage() {
   }
 
   // The user sees one verb everywhere ("Remove"); the mechanism underneath still differs — an
-  // added channel is hard-deleted (nothing to restore), a base channel gets a reversible
-  // suppression record (restorable from "Recently removed").
+  // added channel is hard-deleted, a base channel gets a suppression record. No in-app restore:
+  // the only way back for a suppressed base channel is re-adding it by URL (which already wins
+  // over a prior suppression via mergeRosterRows's precedence).
   async function onRemove(row: RosterRow): Promise<void> {
     if (row.source === "added") {
       await removeUserChannel(row.channelId);
@@ -194,14 +183,9 @@ export default function ChannelsPage() {
     } else {
       await suppressChannel(row.channelId);
       refreshSuppressed();
-      setToast("Removed — restore from Recently removed below.");
+      setToast("Removed.");
       setTimeout(() => setToast(null), 4000);
     }
-  }
-
-  async function onRestore(channelId: string): Promise<void> {
-    await unsuppressChannel(channelId);
-    refreshSuppressed();
   }
 
   async function onChangeAddedTier(channelId: string, newTier: Tier): Promise<void> {
@@ -391,42 +375,6 @@ export default function ChannelsPage() {
         </section>
       </div>
 
-      {/* Tucked away, not an always-visible roster-like section — a collapsed drawer at the
-          very bottom of the library, same affordance as "Add a channel" above. */}
-      <details className="mt-10 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-zinc-100">
-          Recently removed{" "}
-          {recentlyRemovedRows.length > 0 && (
-            <span className="font-normal text-zinc-500">({recentlyRemovedRows.length})</span>
-          )}
-        </summary>
-
-        {recentlyRemovedRows.length === 0 ? (
-          <p className="mt-3 text-sm text-zinc-500">Nothing removed yet.</p>
-        ) : (
-          <>
-            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {recentlyRemovedRows.slice(0, visibleCount["removed"] ?? PAGE_SIZE).map((row) => (
-                <RecentlyRemovedCard
-                  key={row.channelId}
-                  row={row}
-                  onRestore={() => void onRestore(row.channelId)}
-                />
-              ))}
-            </div>
-            {recentlyRemovedRows.length > (visibleCount["removed"] ?? PAGE_SIZE) && (
-              <button
-                type="button"
-                onClick={() => showMore("removed")}
-                className="mt-3 rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-              >
-                Show more
-              </button>
-            )}
-          </>
-        )}
-      </details>
-
       {toast && (
         <div
           role="status"
@@ -577,34 +525,6 @@ function ChannelCard({
           Remove
         </button>
       </div>
-    </div>
-  );
-}
-
-function RecentlyRemovedCard({ row, onRestore }: { row: RosterRow; onRestore: () => void }) {
-  return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950/60 p-3 opacity-70">
-      <Link href={`/channel/${row.channelId}`} className="flex items-center gap-3">
-        {row.avatarUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={row.avatarUrl} alt="" className="h-10 w-10 rounded-full object-cover grayscale" />
-        ) : (
-          <div className="h-10 w-10 rounded-full bg-zinc-900" />
-        )}
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-zinc-300">{row.title}</p>
-          <p className="truncate text-xs text-zinc-600">
-            {row.handle} · Tier {row.tier ?? "—"}
-          </p>
-        </div>
-      </Link>
-      <button
-        type="button"
-        onClick={onRestore}
-        className="mt-2 w-full rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-      >
-        Restore
-      </button>
     </div>
   );
 }
