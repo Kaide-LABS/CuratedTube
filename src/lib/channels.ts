@@ -11,7 +11,14 @@
 // makes the fallback (UU full uploads + client-side /shorts/ filtering) a one-line swap.
 
 import rawRoster from "../../channels.json";
-import { RosterSchema, type ChannelConfig, type Category, type Tier } from "./types";
+import {
+  RosterSchema,
+  type ChannelAddition,
+  type ChannelConfig,
+  type Category,
+  type RosterRow,
+  type Tier,
+} from "./types";
 
 // Flip to false to fall back to UU (full uploads) if UULF ever stops resolving.
 // When false, the data layer must additionally drop Shorts (see youtube.ts isShort()).
@@ -107,6 +114,98 @@ export function getTierOf(channelId: string): Tier | undefined {
 /** True when no channel has been resolved + classified yet (fresh clone, before resolve-channels). */
 export function isUnconfigured(): boolean {
   return getChannels().length === 0;
+}
+
+/** Every raw roster entry (resolved or not, active or parked) — the Channel Library's source. */
+export function getAllChannelConfigs(): ChannelConfig[] {
+  return ROSTER.channels;
+}
+
+/** A resolved channel's uploads playlist id, honoring a stored value before deriving one. */
+function uploadsPlaylistIdOf(c: ChannelConfig & { channelId: string }): string {
+  return c.uploadsPlaylistId && c.uploadsPlaylistId.length > 0
+    ? c.uploadsPlaylistId
+    : resolveUploadsPlaylistId(c.channelId);
+}
+
+/**
+ * Convert a resolved base-roster entry into a {@link RosterRow} (Channel Library). `meta` fills
+ * in title/avatar/subscriberCount when the baked roster is missing them (unresolved enrichment,
+ * backfilled server-side — see data.ts's getBaseRosterRows).
+ */
+export function toRosterRow(
+  c: ChannelConfig & { channelId: string },
+  meta?: { title?: string; avatarUrl?: string; subscriberCount?: number },
+): RosterRow {
+  return {
+    channelId: c.channelId,
+    handle: c.handle,
+    title: c.title || meta?.title || "",
+    avatarUrl: c.avatarUrl || meta?.avatarUrl || "",
+    subscriberCount: c.subscriberCount ?? meta?.subscriberCount ?? 0,
+    uploadsPlaylistId: uploadsPlaylistIdOf(c),
+    category: c.category,
+    tier: c.tier,
+    source: "base",
+    parked: c.tier === null || c.parked === true,
+    confirm: c.confirm === true,
+    usedUU: c.fellBackToUU === true,
+    shortsOnly: c.shortsOnlyOrEmpty === true,
+  };
+}
+
+function rosterRowFromAddition(a: ChannelAddition): RosterRow {
+  return {
+    channelId: a.channelId,
+    handle: a.handle,
+    title: a.title,
+    avatarUrl: a.avatarUrl,
+    subscriberCount: a.subscriberCount,
+    uploadsPlaylistId: a.uploadsPlaylistId,
+    category: a.category,
+    tier: a.tier,
+    source: "added",
+    parked: false, // an addition always carries an explicit active tier — never parked
+    confirm: false,
+    usedUU: a.usedUU ?? false,
+    shortsOnly: a.shortsOnly ?? false,
+  };
+}
+
+/**
+ * Merge base roster rows with user additions (Channel Library / same "addition wins" rule as
+ * {@link "./feed".mergeAdditionVideos}). Any base row whose channelId was also user-added is
+ * replaced by the addition's row (freshest tier/category — this is also how a parked base
+ * channel gets "promoted": see {@link promoteParkedRow}). Pure — no I/O, unit-testable.
+ */
+export function mergeRosterRows(baseRows: RosterRow[], additions: ChannelAddition[]): RosterRow[] {
+  const additionRows = additions.map(rosterRowFromAddition);
+  const additionIds = new Set(additionRows.map((r) => r.channelId));
+  const filteredBase = baseRows.filter((r) => !additionIds.has(r.channelId));
+  return [...additionRows, ...filteredBase];
+}
+
+/**
+ * Classify a parked (or unclassified) base-roster row by converting it into a {@link
+ * ChannelAddition} with the chosen tier. Saved into the same IndexedDB `userChannels` store as
+ * any other addition, so it rides the exact "addition wins" merge above straight into the
+ * feed — no separate override mechanism, no channels.json write (impossible on Cloud Run's
+ * ephemeral filesystem anyway).
+ */
+export function promoteParkedRow(row: RosterRow, tier: 1 | 2 | 3): ChannelAddition {
+  return {
+    channelId: row.channelId,
+    handle: row.handle,
+    uploadsPlaylistId: row.uploadsPlaylistId,
+    title: row.title,
+    avatarUrl: row.avatarUrl,
+    subscriberCount: row.subscriberCount,
+    category: row.category,
+    tier,
+    addedAt: new Date().toISOString(),
+    usedUU: row.usedUU,
+    shortsOnly: row.shortsOnly,
+  };
 }
 
 /**

@@ -204,6 +204,11 @@ export const ChannelAdditionSchema = z.object({
   category: z.string(),
   tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   addedAt: z.string(), // ISO timestamp the user saved it
+  // Carried over from the resolve candidate's warnings so the Channel Library can show the
+  // same chips post-save without re-resolving. Absent on records saved before this field
+  // existed; treated as false wherever read (mergeRosterRows / promoteParkedRow).
+  usedUU: z.boolean().optional(),
+  shortsOnly: z.boolean().optional(),
 });
 export type ChannelAddition = z.infer<typeof ChannelAdditionSchema>;
 
@@ -223,3 +228,24 @@ export const ChannelCandidateSchema = z.object({
   }),
 });
 export type ChannelCandidate = z.infer<typeof ChannelCandidateSchema>;
+
+// --- Roster row (Channel Library / GET /api/channels/roster response) --------------------
+// One row per browsable channel — base roster (channels.json) or a user addition, normalized
+// to a common shape. `tier` stays nullable (unlike ChannelAddition) because a parked BASE
+// channel has no tier yet; `parked` is derived so the UI never has to re-derive it from tier.
+export const RosterRowSchema = z.object({
+  channelId: z.string(),
+  handle: z.string(),
+  title: z.string(),
+  avatarUrl: z.string(),
+  subscriberCount: z.number().int().nonnegative(),
+  uploadsPlaylistId: z.string(),
+  category: z.string(),
+  tier: TierSchema,
+  source: z.enum(["base", "added"]),
+  parked: z.boolean(),
+  confirm: z.boolean(),
+  usedUU: z.boolean(),
+  shortsOnly: z.boolean(),
+});
+export type RosterRow = z.infer<typeof RosterRowSchema>;

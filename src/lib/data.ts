@@ -4,7 +4,7 @@
 
 import "server-only";
 import { cache } from "react";
-import { getActiveByTier, getChannelConfig } from "./channels";
+import { getActiveByTier, getAllChannelConfigs, getChannelConfig, toRosterRow } from "./channels";
 import { pollUploads } from "./rss";
 import {
   enrichWithAvatars,
@@ -13,7 +13,7 @@ import {
   hasApiKey,
 } from "./youtube";
 import { sortVideos } from "./feed";
-import type { ChannelAddition, ChannelMeta, SortMode, Tier, Video } from "./types";
+import type { ChannelAddition, ChannelMeta, RosterRow, SortMode, Tier, Video } from "./types";
 
 const RSS_PER_CHANNEL = 12; // newest uploads to consider per channel for the home feed
 const HOME_POOL_CAP = 150; // upper bound on enriched videos serialized to the client
@@ -114,6 +114,40 @@ export async function getAdditionVideos(additions: ChannelAddition[]): Promise<V
     }));
   const { videos } = await buildVideosForChannels(channels);
   return videos;
+}
+
+// ---------------------------------------------------------------------------
+// Channel Library (roster browser): base roster rows, enriched + cached ONCE for the life of
+// the process. The baked roster never changes at runtime, so there is nothing to invalidate —
+// unlike getHomeFeed's per-request `cache()`, this is a plain module-level memo so a second
+// page visit (a new request) reuses it instead of re-enriching.
+// ---------------------------------------------------------------------------
+let cachedBaseRosterRows: RosterRow[] | null = null;
+
+/**
+ * Base (channels.json) roster rows for the Channel Library. Only entries missing avatarUrl or
+ * subscriberCount are enriched via channels.list (1 unit/50) — most baked entries already carry
+ * both, so a typical roster costs 0 units here. Unresolved entries (channelId still null,
+ * awaiting the build-time resolve step) are excluded — they are not yet real, browsable channels.
+ */
+export async function getBaseRosterRows(): Promise<RosterRow[]> {
+  if (cachedBaseRosterRows) return cachedBaseRosterRows;
+
+  const resolved = getAllChannelConfigs().filter(
+    (c): c is typeof c & { channelId: string } => Boolean(c.channelId),
+  );
+  const missingIds = resolved
+    .filter((c) => !c.avatarUrl || c.subscriberCount === undefined)
+    .map((c) => c.channelId);
+
+  const metaById = new Map<string, ChannelMeta>();
+  if (hasApiKey() && missingIds.length > 0) {
+    const metas = await getChannelMeta(missingIds);
+    for (const m of metas) metaById.set(m.channelId, m);
+  }
+
+  cachedBaseRosterRows = resolved.map((c) => toRosterRow(c, metaById.get(c.channelId)));
+  return cachedBaseRosterRows;
 }
 
 export type ChannelArchive = {
