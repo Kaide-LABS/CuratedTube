@@ -7,6 +7,7 @@ import { buildHomeFeed, mergeAdditionVideos, sortVideos, HOME_FEED_CAP } from "@
 import { DEFAULT_RANKING_CONFIG } from "@/lib/ranking-config";
 import { getImpressionMap, getWatchSignals, recordImpressions } from "@/lib/watchState";
 import { getUserChannels } from "@/lib/userChannels";
+import { getSuppressedChannels } from "@/lib/suppressedChannels";
 import { z } from "zod";
 import { CategoryFilterBar, type CategoryOption } from "./CategoryFilterBar";
 import { VideoPreviewCard } from "./VideoPreviewCard";
@@ -23,12 +24,13 @@ const AdditionVideosResponseSchema = z.object({ videos: z.array(VideoSchema) });
  */
 export function HomeFeed({ pool }: { pool: Video[] }) {
   const [additionVideos, setAdditionVideos] = useState<Video[]>([]);
-  // The effective pool = base (server-rendered) + user channel additions (IndexedDB overlay,
-  // client-only — the server can't see it on the initial render). Merged AFTER mount for the
-  // same hydration-mismatch reason as the ranking signals below.
+  const [suppressedIds, setSuppressedIds] = useState<string[]>([]);
+  // The effective pool = base (server-rendered) + user channel additions - suppressed channels
+  // (both IndexedDB overlays, client-only — the server can't see either on the initial render).
+  // Merged AFTER mount for the same hydration-mismatch reason as the ranking signals below.
   const effectivePool = useMemo(
-    () => mergeAdditionVideos(pool, additionVideos),
-    [pool, additionVideos],
+    () => mergeAdditionVideos(pool, additionVideos, suppressedIds),
+    [pool, additionVideos, suppressedIds],
   );
 
   // Distinct categories present in the effective pool, for the filter pills.
@@ -93,6 +95,18 @@ export function HomeFeed({ pool }: { pool: Video[] }) {
       } catch {
         /* addition videos are additive; a failed fetch just leaves the base pool as-is */
       }
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Hidden (suppressed) base channels: read-only IndexedDB check, no server round trip needed —
+  // the ids alone are enough to drop their videos from the base pool in mergeAdditionVideos.
+  useEffect(() => {
+    let alive = true;
+    getSuppressedChannels().then((suppressed) => {
+      if (alive) setSuppressedIds(suppressed.map((s) => s.channelId));
     });
     return () => {
       alive = false;

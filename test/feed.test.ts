@@ -201,6 +201,23 @@ describe("mergeAdditionVideos — user channel additions overlay (add-channels-b
     const base = mkVideos(1, 4, "base");
     expect(mergeAdditionVideos(base, [])).toEqual(base);
   });
+
+  it("drops a suppressed channel's videos from the base pool (remove/hide any channel)", () => {
+    const kept = mkVideos(1, 2, "kept");
+    const hiddenChannelId = "UChidden";
+    const hidden = mkVideos(1, 2, "hidden").map((v) => ({ ...v, channelId: hiddenChannelId }));
+    const merged = mergeAdditionVideos([...kept, ...hidden], [], [hiddenChannelId]);
+    expect(merged.map((v) => v.videoId).sort()).toEqual(kept.map((v) => v.videoId).sort());
+  });
+
+  it("precedence: re-adding a suppressed channel's videos survive (addition always wins over suppression)", () => {
+    const channelId = "UCreadded";
+    const baseVideo = { ...mkVideos(1, 1, "x")[0], channelId, videoId: "shared" };
+    const additionVideo = { ...mkVideos(2, 1, "y")[0], channelId, videoId: "shared" };
+    const merged = mergeAdditionVideos([baseVideo], [additionVideo], [channelId]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].tier).toBe(2); // the addition's copy, not suppressed away
+  });
 });
 
 describe("buildHomeFeed with user channel additions present", () => {
@@ -222,6 +239,24 @@ describe("buildHomeFeed with user channel additions present", () => {
     const feed = buildHomeFeed(merged);
     expect(feed.some((v) => v.tier === 3)).toBe(false);
     expect(feed).toHaveLength(4); // only the 4 active-tier base videos are eligible
+  });
+
+  it("removing/hiding channels can drop a tier below its slot count — fills what's available, never errors, never backfills from Tier 3", () => {
+    const base = [...mkVideos(1, 20, "b1"), ...mkVideos(2, 20, "b2"), ...mkVideos(3, 20, "b3")];
+    const suppressedChannelId = "UCb1"; // suppress the ONLY Tier-1 channel entirely
+    const merged = mergeAdditionVideos(
+      base.map((v) => (v.tier === 1 ? { ...v, channelId: suppressedChannelId } : v)),
+      [],
+      [suppressedChannelId],
+    );
+    expect(() => buildHomeFeed(merged)).not.toThrow();
+    const feed = buildHomeFeed(merged);
+    // Tier 1 has nothing left; Tier 2 fills its own budget PLUS the Tier-1 shortfall via
+    // backfill (still only from the other ACTIVE tier — Tier 3 stays excluded no matter what).
+    expect(feed.filter((v) => v.tier === 1)).toHaveLength(0);
+    expect(feed.filter((v) => v.tier === 2)).toHaveLength(20); // all 20 available Tier-2 videos
+    expect(feed.some((v) => v.tier === 3)).toBe(false);
+    expect(feed.length).toBeLessThan(24); // shortfall isn't force-filled — no error, no Tier-3 pull
   });
 });
 

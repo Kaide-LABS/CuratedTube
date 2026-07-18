@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   getAllChannelConfigs,
+  isChannelHidden,
   mergeRosterRows,
   promoteParkedRow,
   toRosterRow,
@@ -140,6 +141,56 @@ describe("tier grouping counts (Channel Library header strip)", () => {
     expect(parked).toHaveLength(1);
     expect(active.filter((r) => r.tier === 1)).toHaveLength(1);
     expect(active.filter((r) => r.tier === 2)).toHaveLength(1);
+  });
+});
+
+describe("mergeRosterRows — suppression overlay (remove/hide any channel)", () => {
+  it("suppressing a base channelId removes it from the effective roster", () => {
+    const base = [mkRow({ channelId: "UCsuppressed0000000000", tier: 1 }), mkRow({ channelId: "UCkept00000000000000" })];
+    const merged = mergeRosterRows(base, [], ["UCsuppressed0000000000"]);
+    expect(merged.map((r) => r.channelId)).toEqual(["UCkept00000000000000"]);
+  });
+
+  it("un-hiding (suppression list no longer includes the id) restores it", () => {
+    const base = [mkRow({ channelId: "UChidden000000000000", tier: 1 })];
+    const hidden = mergeRosterRows(base, [], ["UChidden000000000000"]);
+    expect(hidden).toHaveLength(0);
+
+    const restored = mergeRosterRows(base, [], []); // suppression record deleted
+    expect(restored).toHaveLength(1);
+    expect(restored[0].channelId).toBe("UChidden000000000000");
+  });
+
+  it("precedence: a base channel that is BOTH suppressed and re-added by URL — the re-add wins", () => {
+    const base = [mkRow({ channelId: "UCreadded00000000000", tier: 1, title: "Base Title" })];
+    const additions = [mkAddition({ channelId: "UCreadded00000000000", tier: 2, title: "Re-added Title" })];
+    const merged = mergeRosterRows(base, additions, ["UCreadded00000000000"]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].source).toBe("added");
+    expect(merged[0].title).toBe("Re-added Title");
+    expect(merged[0].tier).toBe(2);
+  });
+
+  it("suppression never affects an already-added channel that isn't in the suppressed list", () => {
+    const base: RosterRow[] = [];
+    const additions = [mkAddition({ channelId: "UCunrelated000000000" })];
+    const merged = mergeRosterRows(base, additions, ["UCsomeotherid00000000"]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].channelId).toBe("UCunrelated000000000");
+  });
+});
+
+describe("isChannelHidden — single-channelId equivalent used by the channel page", () => {
+  it("is hidden when suppressed and not re-added", () => {
+    expect(isChannelHidden("UCx", ["UCx"], [])).toBe(true);
+  });
+
+  it("is NOT hidden when suppressed but re-added (re-add wins)", () => {
+    expect(isChannelHidden("UCx", ["UCx"], ["UCx"])).toBe(false);
+  });
+
+  it("is not hidden when never suppressed", () => {
+    expect(isChannelHidden("UCx", [], [])).toBe(false);
   });
 });
 

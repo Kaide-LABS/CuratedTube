@@ -173,16 +173,48 @@ function rosterRowFromAddition(a: ChannelAddition): RosterRow {
 }
 
 /**
- * Merge base roster rows with user additions (Channel Library / same "addition wins" rule as
- * {@link "./feed".mergeAdditionVideos}). Any base row whose channelId was also user-added is
- * replaced by the addition's row (freshest tier/category — this is also how a parked base
- * channel gets "promoted": see {@link promoteParkedRow}). Pure — no I/O, unit-testable.
+ * Merge base roster rows with user additions and subtract suppressed channelIds — THE ONE
+ * shared effective-roster function reused by the feed (via {@link "./feed".mergeAdditionVideos},
+ * which mirrors this same precedence at the video level), the Channel Library, and (through
+ * {@link isChannelHidden}) the channel page.
+ *
+ * Precedence, in order:
+ *  1. A user addition always wins — its row replaces any base row with the same channelId,
+ *     REGARDLESS of suppression (re-adding a channel you'd hidden un-hides it implicitly; this
+ *     is also how a parked base channel gets "promoted", see {@link promoteParkedRow}).
+ *  2. Otherwise, a suppressed base channelId is dropped entirely (reversible — see
+ *     suppressedChannels.ts's unsuppressChannel).
+ *  3. Everything else passes through unchanged.
+ *
+ * Pure — no I/O, unit-testable.
  */
-export function mergeRosterRows(baseRows: RosterRow[], additions: ChannelAddition[]): RosterRow[] {
+export function mergeRosterRows(
+  baseRows: RosterRow[],
+  additions: ChannelAddition[],
+  suppressedIds: Iterable<string> = [],
+): RosterRow[] {
   const additionRows = additions.map(rosterRowFromAddition);
   const additionIds = new Set(additionRows.map((r) => r.channelId));
-  const filteredBase = baseRows.filter((r) => !additionIds.has(r.channelId));
+  const suppressed = new Set(suppressedIds);
+  const filteredBase = baseRows.filter(
+    (r) => !additionIds.has(r.channelId) && !suppressed.has(r.channelId),
+  );
   return [...additionRows, ...filteredBase];
+}
+
+/**
+ * Single-channelId equivalent of {@link mergeRosterRows}'s suppression rule, for the channel
+ * page (which resolves one channelId at a time, not a full roster list): a base channel is
+ * hidden when it's suppressed AND has not been re-added — an explicit re-add always wins.
+ */
+export function isChannelHidden(
+  channelId: string,
+  suppressedIds: Iterable<string>,
+  additionIds: Iterable<string>,
+): boolean {
+  for (const id of additionIds) if (id === channelId) return false;
+  for (const id of suppressedIds) if (id === channelId) return true;
+  return false;
 }
 
 /**

@@ -249,3 +249,15 @@ export const RosterRowSchema = z.object({
   shortsOnly: z.boolean(),
 });
 export type RosterRow = z.infer<typeof RosterRowSchema>;
+
+// --- Suppressed channel (IndexedDB overlay — hides a BASE channel without touching channels.json) ---
+// Reversible: deleting the record un-hides the channel. Only ever applies to base-roster
+// channelIds — a user addition is hard-deleted on removal, never suppressed (there'd be nothing
+// left to un-hide back to).
+export const SuppressedChannelSchema = z.object({
+  channelId: z
+    .string()
+    .regex(/^UC[A-Za-z0-9_-]{22}$/),
+  suppressedAt: z.string(), // ISO timestamp the user hid it
+});
+export type SuppressedChannel = z.infer<typeof SuppressedChannelSchema>;

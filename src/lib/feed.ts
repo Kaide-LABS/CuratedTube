@@ -140,14 +140,24 @@ function buildRanked(videos: Video[], slots: TierSlots, cap: number, ctx: RankCo
 }
 
 /**
- * Merge user-added-channel videos into the base pool (user channels feature). "Addition wins":
- * any base-pool video whose channel was also user-added is dropped in favor of the addition's
- * (freshly tagged tier/category) copy, then the two sets are deduped by videoId. Pure so the
- * 15/9/0 tier allocation with additions present is unit-testable without any network.
+ * Merge user-added-channel videos into the base pool AND drop suppressed channels' videos (user
+ * channels + hide-any-channel features). Mirrors {@link "./channels".mergeRosterRows}'s exact
+ * precedence at the video level rather than reimplementing it: an addition always wins (its
+ * videos replace any base-pool video from the same channel, regardless of suppression — a
+ * re-add implicitly un-hides), otherwise a suppressed channel's base-pool videos are dropped.
+ * The two surviving sets are then deduped by videoId. Pure so the 15/9/0 tier allocation with
+ * additions/suppressions present is unit-testable without any network.
  */
-export function mergeAdditionVideos(basePool: Video[], additionVideos: Video[]): Video[] {
+export function mergeAdditionVideos(
+  basePool: Video[],
+  additionVideos: Video[],
+  suppressedChannelIds: Iterable<string> = [],
+): Video[] {
   const additionChannelIds = new Set(additionVideos.map((v) => v.channelId));
-  const filteredBase = basePool.filter((v) => !additionChannelIds.has(v.channelId));
+  const suppressed = new Set(suppressedChannelIds);
+  const filteredBase = basePool.filter(
+    (v) => !additionChannelIds.has(v.channelId) && !suppressed.has(v.channelId),
+  );
   const seen = new Set<string>();
   const merged: Video[] = [];
   for (const v of [...additionVideos, ...filteredBase]) {

@@ -13,6 +13,11 @@ import {
 } from "@/lib/types";
 import { mergeRosterRows, promoteParkedRow } from "@/lib/channels";
 import { addUserChannel, getUserChannels, removeUserChannel } from "@/lib/userChannels";
+import {
+  getSuppressedChannels,
+  suppressChannel,
+  unsuppressChannel,
+} from "@/lib/suppressedChannels";
 
 const ErrorResponseSchema = z.object({ error: z.string() });
 const RosterResponseSchema = z.object({ rows: z.array(RosterRowSchema) });
@@ -46,6 +51,7 @@ function subCount(n: number): string {
 export default function ChannelsPage() {
   const [baseRows, setBaseRows] = useState<RosterRow[]>([]);
   const [additions, setAdditions] = useState<ChannelAddition[]>([]);
+  const [suppressedIds, setSuppressedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState<Record<string, number>>({});
@@ -63,20 +69,34 @@ export default function ChannelsPage() {
     getUserChannels().then(setAdditions);
   };
 
+  const refreshSuppressed = () => {
+    getSuppressedChannels().then((s) => setSuppressedIds(s.map((r) => r.channelId)));
+  };
+
   useEffect(() => {
     refreshAdditions();
+    refreshSuppressed();
     fetch("/api/channels/roster")
       .then((r) => r.json())
       .then((body) => setBaseRows(RosterResponseSchema.parse(body).rows))
       .finally(() => setLoading(false));
   }, []);
 
-  // Effective roster = base + additions, deduped by channelId, addition wins. Same merge rule
-  // the feed builder uses (mergeAdditionVideos) — reused here at the channel-config level.
+  // Effective roster = base + additions - suppressed, deduped by channelId, addition wins over
+  // both a same-channelId base row AND any prior suppression. Same merge the feed builder uses
+  // (mergeAdditionVideos mirrors this at the video level) — reused here, not reimplemented.
   const effectiveRoster = useMemo(
-    () => mergeRosterRows(baseRows, additions),
-    [baseRows, additions],
+    () => mergeRosterRows(baseRows, additions, suppressedIds),
+    [baseRows, additions, suppressedIds],
   );
+
+  // Hidden base channels: their original base rows, kept around (unlike the effective roster)
+  // so the "Hidden channels" section can still show what they were and offer an Un-hide action.
+  const hiddenBaseRows = useMemo(() => {
+    const suppressed = new Set(suppressedIds);
+    const addedIds = new Set(additions.map((a) => a.channelId));
+    return baseRows.filter((r) => suppressed.has(r.channelId) && !addedIds.has(r.channelId));
+  }, [baseRows, suppressedIds, additions]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -157,9 +177,21 @@ export default function ChannelsPage() {
     }
   }
 
-  async function onRemove(channelId: string): Promise<void> {
-    await removeUserChannel(channelId);
-    refreshAdditions();
+  // Base channel -> reversible suppression overlay (Un-hide restores it). Added channel -> hard
+  // delete of its userChannels record (already worked before this feature).
+  async function onRemove(row: RosterRow): Promise<void> {
+    if (row.source === "added") {
+      await removeUserChannel(row.channelId);
+      refreshAdditions();
+    } else {
+      await suppressChannel(row.channelId);
+      refreshSuppressed();
+    }
+  }
+
+  async function onUnhide(channelId: string): Promise<void> {
+    await unsuppressChannel(channelId);
+    refreshSuppressed();
   }
 
   async function onChangeAddedTier(channelId: string, newTier: Tier): Promise<void> {
@@ -317,7 +349,7 @@ export default function ChannelsPage() {
             rows={t === 1 ? tier1 : t === 2 ? tier2 : tier3}
             visibleCount={visibleCount[`tier-${t}`] ?? PAGE_SIZE}
             onShowMore={() => showMore(`tier-${t}`)}
-            onRemove={(id) => void onRemove(id)}
+            onRemove={(row) => void onRemove(row)}
             onChangeTier={(id, nt) => void onChangeAddedTier(id, nt)}
           />
         ))}
@@ -347,6 +379,32 @@ export default function ChannelsPage() {
             </button>
           )}
         </section>
+
+        {hiddenBaseRows.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold text-zinc-100">
+              Hidden channels{" "}
+              <span className="font-normal text-zinc-500">({hiddenBaseRows.length})</span>
+            </h2>
+            <p className="mt-0.5 text-xs text-zinc-500">
+              Removed base channels — reversible. Un-hide to restore.
+            </p>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {hiddenBaseRows.slice(0, visibleCount["hidden"] ?? PAGE_SIZE).map((row) => (
+                <HiddenCard key={row.channelId} row={row} onUnhide={() => void onUnhide(row.channelId)} />
+              ))}
+            </div>
+            {hiddenBaseRows.length > (visibleCount["hidden"] ?? PAGE_SIZE) && (
+              <button
+                type="button"
+                onClick={() => showMore("hidden")}
+                className="mt-3 rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              >
+                Show more
+              </button>
+            )}
+          </section>
+        )}
       </div>
     </div>
   );
@@ -364,7 +422,7 @@ function TierSection({
   rows: RosterRow[];
   visibleCount: number;
   onShowMore: () => void;
-  onRemove: (channelId: string) => void;
+  onRemove: (row: RosterRow) => void;
   onChangeTier: (channelId: string, tier: Tier) => void;
 }) {
   // Grouped by category within the tier — categories are derived from the roster, never hardcoded.
@@ -389,7 +447,7 @@ function TierSection({
             <ChannelCard
               key={row.channelId}
               row={row}
-              onRemove={() => onRemove(row.channelId)}
+              onRemove={() => onRemove(row)}
               onChangeTier={(nt) => onChangeTier(row.channelId, nt)}
             />
           ))}
@@ -482,18 +540,42 @@ function ChannelCard({
           <span className="text-[11px] text-zinc-600">Tier read-only (base channel)</span>
         )}
 
-        {row.source === "added" ? (
-          <button
-            type="button"
-            onClick={onRemove}
-            className="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-          >
-            Remove
-          </button>
-        ) : (
-          <span className="text-[11px] text-zinc-600">Not removable</span>
-        )}
+        <button
+          type="button"
+          onClick={onRemove}
+          className="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+        >
+          {row.source === "added" ? "Remove" : "Hide"}
+        </button>
       </div>
+    </div>
+  );
+}
+
+function HiddenCard({ row, onUnhide }: { row: RosterRow; onUnhide: () => void }) {
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-zinc-950/60 p-3 opacity-70">
+      <Link href={`/channel/${row.channelId}`} className="flex items-center gap-3">
+        {row.avatarUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={row.avatarUrl} alt="" className="h-10 w-10 rounded-full object-cover grayscale" />
+        ) : (
+          <div className="h-10 w-10 rounded-full bg-zinc-900" />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-zinc-300">{row.title}</p>
+          <p className="truncate text-xs text-zinc-600">
+            {row.handle} · Tier {row.tier ?? "—"}
+          </p>
+        </div>
+      </Link>
+      <button
+        type="button"
+        onClick={onUnhide}
+        className="mt-2 w-full rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+      >
+        Un-hide
+      </button>
     </div>
   );
 }
