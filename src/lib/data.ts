@@ -155,20 +155,32 @@ export type ChannelArchive = {
   videos: Video[]; // full enriched archive (sorted client-side per tab)
 };
 
+/**
+ * Fetch + enrich one channel's uploads by (channelId, uploadsPlaylistId), with the same UULF→UU
+ * fallback + Shorts-filter drill as the rest of the data layer. Never tier-gates — a Tier-3
+ * channel's page must still list its videos (0 home slots ≠ 0 channel-page videos). Shared by
+ * the base-roster channel archive below and the added-channel videos route (`/api/channels/
+ * videos`), so a user-added channel's page reuses the exact same fetch pipeline as a baked one.
+ */
+export async function getChannelVideos(
+  channelId: string,
+  uploadsPlaylistId: string,
+  maxPages = 4,
+): Promise<Video[]> {
+  const uploads = await getChannelUploads(channelId, { primaryPlaylistId: uploadsPlaylistId, maxPages });
+  return enrichWithAvatars(uploads.refs.map((r) => r.videoId), { filterShorts: uploads.usedUU });
+}
+
 /** Channel page: header meta + enriched archive (bounded), sorted by the active tab. */
 export const getChannelArchive = cache(
   async (channelId: string, sort: SortMode = "latest", maxPages = 4): Promise<ChannelArchive> => {
     const cfg = getChannelConfig(channelId);
     if (!hasApiKey() || !cfg) return { meta: null, videos: [] };
 
-    const [metas, uploads] = await Promise.all([
+    const [metas, videos] = await Promise.all([
       getChannelMeta([channelId]),
-      getChannelUploads(channelId, { primaryPlaylistId: cfg.uploadsPlaylistId, maxPages }),
+      getChannelVideos(channelId, cfg.uploadsPlaylistId, maxPages),
     ]);
-    const videos = await enrichWithAvatars(
-      uploads.refs.map((r) => r.videoId),
-      { filterShorts: uploads.usedUU },
-    );
     return { meta: metas[0] ?? null, videos: sortVideos(videos, sort) };
   },
 );

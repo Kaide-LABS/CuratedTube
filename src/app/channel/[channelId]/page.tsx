@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { getChannelArchive } from "@/lib/data";
 import { formatCount } from "@/lib/format";
 import { ChannelArchive } from "@/components/ChannelArchive";
+import { AddedChannelView } from "@/components/AddedChannelView";
 
 // Dynamic: Data API reads use `cache: "no-store"` (the ETag/304 layer governs quota spend).
 export const dynamic = "force-dynamic";
@@ -15,7 +15,11 @@ export default async function ChannelPage({
   const { channelId } = await params;
   const { meta, videos } = await getChannelArchive(channelId, "latest");
 
-  if (!meta) notFound();
+  // Not in the base roster (channels.json) — could still be a user-added channel living only
+  // in the client's IndexedDB, invisible to this server-rendered lookup. Hand off to the client
+  // fallback, which checks the effective roster's client-side half and 404s only if that's
+  // empty too (see AddedChannelView).
+  if (!meta) return <AddedChannelView channelId={channelId} />;
 
   return (
     <div>

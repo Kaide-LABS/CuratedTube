@@ -7,7 +7,7 @@
  *   - same-origin static assets -> cache-first
  *   - everything cross-origin (googleapis.com / youtube.com) -> not intercepted (passes through)
  */
-const CACHE = "curatedtube-shell-v1";
+const CACHE = "curatedtube-shell-v2";
 const OFFLINE_URL = "/offline.html";
 const PRECACHE = [OFFLINE_URL, "/icon-192.png", "/icon-512.png"];
 
