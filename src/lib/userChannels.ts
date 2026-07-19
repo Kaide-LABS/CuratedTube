@@ -2,8 +2,8 @@
 // (add-channels-by-URL feature). The baked roster is read-only in production (Cloud Run's
 // filesystem is ephemeral — a write would not survive a cold start or a second instance), so
 // user additions live entirely in this browser's IndexedDB, never written back to the file.
-// All ops are idempotent and degrade silently when storage is unavailable, matching
-// watchLater.ts.
+// All ops are idempotent and degrade silently when storage is unavailable, matching the rest
+// of this module family (playlists.ts, suppressedChannels.ts, etc).
 "use client";
 
 import { tx } from "./watchState";

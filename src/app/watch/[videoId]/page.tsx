@@ -5,16 +5,30 @@ import { WatchPlayer } from "@/components/WatchPlayer";
 import { MetadataPanel } from "@/components/MetadataPanel";
 import { VideoPreviewCard } from "@/components/VideoPreviewCard";
 import { WatchLaterButton } from "@/components/WatchLaterButton";
+import { PlaylistWatchView } from "@/components/PlaylistWatchView";
 
 // Dynamic: Data API reads use `cache: "no-store"` (the ETag/304 layer governs quota spend).
 export const dynamic = "force-dynamic";
 
 export default async function WatchPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ videoId: string }>;
+  searchParams: Promise<{ list?: string }>;
 }) {
   const { videoId } = await params;
+  const { list } = await searchParams;
+
+  // Playlist provenance (?list=<playlistId>): resolve ENTIRELY from the local snapshot, client-
+  // side — no server Data API call, no roster/existence check (a playlist item the user saved
+  // deliberately must still play even if its channel was later removed/suppressed). This never
+  // touches the normal flow below; if the snapshot turns out to be missing/stale, the client
+  // component itself falls back by redirecting to the plain (unprovenanced) URL.
+  if (list) {
+    return <PlaylistWatchView videoId={videoId} playlistId={list} />;
+  }
+
   const { video, meta, rail } = await getWatchData(videoId);
 
   if (!video) notFound();

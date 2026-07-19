@@ -40,6 +40,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 Watch Later
               </Link>
               <Link
+                href="/playlists"
+                className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Playlists
+              </Link>
+              <Link
                 href="/channels"
                 className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
               >

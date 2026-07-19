@@ -14,7 +14,7 @@ import {
   tickActive,
   type GuardianClock,
 } from "../src/lib/watchGuardian";
-import type { WatchSession } from "../src/lib/types";
+import { WatchSessionSchema, type WatchSession } from "../src/lib/types";
 
 describe("tickActive — timestamp-delta accounting (never setInterval tick-counting)", () => {
   it("play 10s -> pause 30s -> play 5s = 15s counted", () => {
@@ -130,24 +130,30 @@ describe("reconcileSessionForToday — midnight rollover + clock guard", () => {
   });
 });
 
-describe("nextUnshownThreshold — fires once per threshold, in order", () => {
+describe("nextUnshownThreshold — fires once per threshold (30/60/90/120), in order", () => {
   it("returns the first crossed threshold not yet shown", () => {
     expect(nextUnshownThreshold(30 * 60, [])).toBe(30);
     expect(nextUnshownThreshold(65 * 60, [30])).toBe(60);
     expect(nextUnshownThreshold(95 * 60, [30, 60])).toBe(90);
+    expect(nextUnshownThreshold(125 * 60, [30, 60, 90])).toBe(120);
   });
 
   it("returns null once all crossed thresholds have already fired", () => {
-    expect(nextUnshownThreshold(100 * 60, [30, 60, 90])).toBeNull();
+    expect(nextUnshownThreshold(130 * 60, [30, 60, 90, 120])).toBeNull();
   });
 
   it("returns null below the first threshold", () => {
     expect(nextUnshownThreshold(10 * 60, [])).toBeNull();
   });
+
+  it("returns null between 90 and 120 once 90 has already fired (120 not yet crossed)", () => {
+    expect(nextUnshownThreshold(100 * 60, [30, 60, 90])).toBeNull();
+  });
 });
 
 describe("hasReachedCap", () => {
-  it("is exact at the 120-minute boundary", () => {
+  it("is exact at the 150-minute (2.5h) boundary", () => {
+    expect(CAP_MINUTES).toBe(150);
     expect(hasReachedCap(CAP_MINUTES * 60 - 1)).toBe(false);
     expect(hasReachedCap(CAP_MINUTES * 60)).toBe(true);
   });
@@ -181,14 +187,16 @@ describe("decideGuardianActions — mandatory ordering, no implicit resume", () 
   it("reaching the cap takes priority over a still-unshown threshold and locks instead", () => {
     const actions = decideGuardianActions({
       activeSeconds: CAP_MINUTES * 60,
-      interruptsShown: [30, 60], // 90 not yet shown, but cap wins
+      interruptsShown: [30, 60], // 90 and 120 not yet shown, but cap wins
       capReached: false,
       isFullscreen: true,
     });
     expect(actions.map((a) => a.type)).toEqual(["exitFullscreen", "pause", "showLocked"]);
   });
 
-  it("once capReached is already true, no further actions fire (already locked)", () => {
+  it("once capReached is already true, no further actions fire (already locked) even with an unshown threshold still pending", () => {
+    // Defensive: capReached always short-circuits to [], regardless of interruptsShown — this
+    // covers a cross-tab race where capReached synced before interruptsShown finished converging.
     expect(
       decideGuardianActions({ activeSeconds: CAP_MINUTES * 60 + 500, interruptsShown: [30, 60, 90], capReached: true, isFullscreen: false }),
     ).toEqual([]);
@@ -225,5 +233,22 @@ describe("buildChatGptCheckinUrl — the AI door is optional and powerless", () 
     expect(url.startsWith("https://chatgpt.com/?q=")).toBe(true);
     const q = new URL(url).searchParams.get("q");
     expect(q).toBe("I've been watching videos to avoid some stress. Can you check in with me?");
+  });
+});
+
+describe("WatchSessionSchema — accepts the current threshold set AND old persisted records", () => {
+  it("parses a fresh record containing the new 120 threshold", () => {
+    const session = { date: "2026-07-20", activeSeconds: 130 * 60, interruptsShown: [30, 60, 90, 120], capReached: false };
+    expect(() => WatchSessionSchema.parse(session)).not.toThrow();
+  });
+
+  it("still parses yesterday's record that only ever contained 30/60/90 (no migration crash)", () => {
+    const yesterdaysRecord = { date: "2026-07-19", activeSeconds: 7200, interruptsShown: [30, 60, 90], capReached: true };
+    expect(() => WatchSessionSchema.parse(yesterdaysRecord)).not.toThrow();
+  });
+
+  it("rejects a threshold outside the known set", () => {
+    const bad = { date: "2026-07-20", activeSeconds: 100, interruptsShown: [45], capReached: false };
+    expect(() => WatchSessionSchema.parse(bad)).toThrow();
   });
 });

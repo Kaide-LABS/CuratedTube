@@ -5,7 +5,7 @@ import { getGuardianSettings, saveGuardianSettings } from "@/lib/watchGuardianSt
 
 /**
  * Settings — currently just the watch-time guardian's preset WhatsApp contact ("Message
- * someone" door on the 30/60/90-minute check-in). The 2h cap and the 30/60/90 thresholds
+ * someone" door on the 30/60/90/120-minute check-in). The 2.5h cap and the thresholds
  * themselves are intentionally NOT editable anywhere in the UI — self-binding is the point.
  */
 export default function SettingsPage() {
@@ -36,7 +36,7 @@ export default function SettingsPage() {
       <section className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
         <h2 className="text-sm font-semibold text-zinc-100">Watch-time check-in contact</h2>
         <p className="mt-1 text-sm text-zinc-400">
-          When a 30/60/90-minute check-in appears, &ldquo;Message someone&rdquo; opens a WhatsApp
+          When a 30/60/90/120-minute check-in appears, &ldquo;Message someone&rdquo; opens a WhatsApp
           chat with this number. International format, digits only — no spaces or a leading
           &ldquo;+&rdquo; needed.
         </p>
@@ -64,7 +64,7 @@ export default function SettingsPage() {
       </section>
 
       <p className="mt-6 text-xs text-zinc-600">
-        The 2-hour daily cap and the 30/60/90-minute check-in thresholds are not editable here —
+        The 2.5-hour daily cap and the 30/60/90/120-minute check-in thresholds are not editable here —
         that&rsquo;s deliberate.
       </p>
     </div>

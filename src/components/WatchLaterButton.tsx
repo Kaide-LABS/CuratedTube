@@ -1,11 +1,13 @@
-// Watch Later toggle (Implements PHASE_3_SPEC.md §6). Used on the watch page; saves a full
-// Video snapshot so the Watch Later surface renders at zero quota. This is a deliberate, manual
-// save — not a queue or autoplay affordance (PHASE_3_SPEC §9).
+// Watch Later toggle (Implements PHASE_3_SPEC.md §6). Used on the watch page. Watch Later is now
+// the fixed-id "watch-later" SYSTEM playlist (playlists.ts) — this button just toggles that one
+// playlist's membership; the general "Add to playlist" picker (AddToPlaylistButton) covers every
+// other playlist. Saves a full snapshot so the Watch Later surface renders at zero quota. This is
+// a deliberate, manual save — not a queue or autoplay affordance (PHASE_3_SPEC §9).
 "use client";
 
 import { useEffect, useState } from "react";
 import type { Video } from "@/lib/types";
-import { addToWatchLater, isInWatchLater, removeFromWatchLater } from "@/lib/watchLater";
+import { addToPlaylist, getPlaylistsContaining, removeFromPlaylist, WATCH_LATER_PLAYLIST_ID } from "@/lib/playlists";
 
 /** Save/remove toggle for a single video, reflecting current Watch Later membership. */
 export function WatchLaterButton({ video }: { video: Video }) {
@@ -14,9 +16,9 @@ export function WatchLaterButton({ video }: { video: Video }) {
 
   useEffect(() => {
     let alive = true;
-    isInWatchLater(video.videoId).then((v) => {
+    getPlaylistsContaining(video.videoId).then((ids) => {
       if (!alive) return;
-      setSaved(v);
+      setSaved(ids.has(WATCH_LATER_PLAYLIST_ID));
       setReady(true);
     });
     return () => {
@@ -27,10 +29,17 @@ export function WatchLaterButton({ video }: { video: Video }) {
   const toggle = async (): Promise<void> => {
     if (saved) {
       setSaved(false);
-      await removeFromWatchLater(video.videoId);
+      await removeFromPlaylist(WATCH_LATER_PLAYLIST_ID, video.videoId);
     } else {
       setSaved(true);
-      await addToWatchLater(video);
+      await addToPlaylist(WATCH_LATER_PLAYLIST_ID, {
+        videoId: video.videoId,
+        title: video.title,
+        thumbnailUrl: video.thumbnailUrl,
+        channelId: video.channelId,
+        channelTitle: video.channelTitle,
+        durationSec: video.durationSec,
+      });
     }
   };
 

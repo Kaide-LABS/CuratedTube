@@ -2,17 +2,22 @@
 // Single-user, no backend. v1 stored watch state (visited videos) to de-emphasize watched cards.
 // v2 added an `impressions` store (anti-repetition signal for the Phase 2 ranker). v3 added the
 // `watchLater` and `session` stores (Phase 3). v4 added `userChannels` (add-channels-by-URL
-// overlay). v5 added `suppressedChannels` (hide-any-channel overlay). v6 adds `watchSession`,
-// `journalEntries`, and `guardianSettings` (watch-time guardian: 2h/day active-playback cap).
-// This module owns the SINGLE DB-open path and the full schema; watchLater.ts, sessionStore.ts,
-// userChannels.ts, suppressedChannels.ts, and watchGuardianStore.ts reuse the exported
-// `openDB`/`tx`. Every migration is additive and idempotent from a fresh state (v1 through v6).
+// overlay). v5 added `suppressedChannels` (hide-any-channel overlay). v6 added `watchSession`,
+// `journalEntries`, and `guardianSettings` (watch-time guardian). v7 adds `playlists` and
+// `playlistItems` (the generalized playlists feature; "Watch Later" is now the system playlist
+// with fixed id "watch-later" — see playlists.ts. watchLater.ts, the old dedicated module, has
+// been deleted; the v3 `watchLater` store it used is unused by app code from v7 onward but is
+// left declared/untouched, matching this module's additive-only, never-delete-a-store migration
+// policy). This module owns the SINGLE DB-open path and the full schema; sessionStore.ts,
+// userChannels.ts, suppressedChannels.ts, watchGuardianStore.ts, and playlists.ts reuse the
+// exported `openDB`/`tx`. Every migration is additive and idempotent from a fresh state (v1
+// through v7).
 "use client";
 
 import type { ImpressionState, WatchState } from "./types";
 
 const DB_NAME = "curatedtube";
-const DB_VERSION = 6; // v5 -> v6: add `watchSession`/`journalEntries`/`guardianSettings` (all prior stores preserved)
+const DB_VERSION = 7; // v6 -> v7: add `playlists`/`playlistItems` (all prior stores preserved)
 const WATCH_STORE = "watchState";
 const IMPRESSION_STORE = "impressions";
 const WATCH_LATER_STORE = "watchLater";
@@ -22,10 +27,12 @@ const SUPPRESSED_CHANNELS_STORE = "suppressedChannels";
 const WATCH_SESSION_STORE = "watchSession";
 const JOURNAL_ENTRIES_STORE = "journalEntries";
 const GUARDIAN_SETTINGS_STORE = "guardianSettings";
+const PLAYLISTS_STORE = "playlists";
+const PLAYLIST_ITEMS_STORE = "playlistItems";
 
 /**
  * Open (and migrate) the shared `curatedtube` IndexedDB. The single DB-open path for every
- * store; watchLater.ts and sessionStore.ts import this rather than calling `indexedDB.open`
+ * store; sessionStore.ts and playlists.ts import this rather than calling `indexedDB.open`
  * with a different version. Rejects when IndexedDB is unavailable (SSR / private mode).
  */
 export function openDB(): Promise<IDBDatabase> {
@@ -66,6 +73,12 @@ export function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(GUARDIAN_SETTINGS_STORE)) {
         db.createObjectStore(GUARDIAN_SETTINGS_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(PLAYLISTS_STORE)) {
+        db.createObjectStore(PLAYLISTS_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(PLAYLIST_ITEMS_STORE)) {
+        db.createObjectStore(PLAYLIST_ITEMS_STORE, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);

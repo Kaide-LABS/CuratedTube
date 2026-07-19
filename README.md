@@ -48,14 +48,14 @@ no metric optimizes for time-on-app.
 
 ## Watch-time guardian
 
-A self-imposed discipline layer on the watch page: staged check-ins at 30/60/90 active minutes
-and a non-negotiable 2-hour (120-minute) daily cap, both measured from real playback time
-(timestamp deltas on player state changes, never `setInterval` tick-counting — a backgrounded
-tab would undercount ticks). State lives in IndexedDB (`watchSession`, per local calendar day),
-is monotonic across writes, and converges across tabs via `BroadcastChannel`. The 30/60/90
-thresholds and the 2h cap are **not** editable anywhere in the UI — self-binding is the point.
-The only editable setting is the preset WhatsApp contact used by the check-in's "Message
-someone" door (`/settings`).
+A self-imposed discipline layer on the watch page: staged check-ins at 30/60/90/120 active
+minutes and a non-negotiable 2.5-hour (150-minute) daily cap, both measured from real playback
+time (timestamp deltas on player state changes, never `setInterval` tick-counting — a
+backgrounded tab would undercount ticks). State lives in IndexedDB (`watchSession`, per local
+calendar day), is monotonic across writes, and converges across tabs via `BroadcastChannel`. The
+thresholds and the cap are **not** editable anywhere in the UI — self-binding is the point. The
+only editable setting is the preset WhatsApp contact used by the check-in's "Message someone"
+door (`/settings`).
 
 **Accepted limitation:** this is client-side, IndexedDB-backed state. It can be cleared via
 DevTools, a private window, or a fresh browser profile, and there is no server-side enforcement.

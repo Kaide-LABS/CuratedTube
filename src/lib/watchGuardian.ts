@@ -1,5 +1,5 @@
 // Watch-time guardian — pure, deterministic core. A self-imposed watch-time discipline layer:
-// staged interrupts at 30/60/90 active minutes, a non-negotiable 120-minute (2h) daily cap.
+// staged interrupts at 30/60/90/120 active minutes, a non-negotiable 150-minute (2.5h) daily cap.
 //
 // ACCEPTED LIMITATION (also in types.ts and README): this is client-side, IndexedDB-backed
 // state. It can be cleared via DevTools, a private window, or a fresh profile. There is no
@@ -15,9 +15,9 @@
 
 import type { WatchSession } from "./types";
 
-export const INTERRUPT_THRESHOLDS_MIN = [30, 60, 90] as const;
+export const INTERRUPT_THRESHOLDS_MIN = [30, 60, 90, 120] as const;
 export type InterruptThresholdMin = (typeof INTERRUPT_THRESHOLDS_MIN)[number];
-export const CAP_MINUTES = 120;
+export const CAP_MINUTES = 150;
 
 /** Local calendar date key (YYYY-MM-DD) for `now`, in the browser's local timezone. */
 export function localDateKey(now: number): string {
@@ -102,7 +102,7 @@ export function tickActive(clock: GuardianClock, now: number, playing: boolean):
   return { activeSec: clock.activeSec + elapsedSec, openStartedAtMs: null };
 }
 
-/** The first 30/60/90-min threshold crossed by `activeSeconds` that hasn't fired yet today. */
+/** The first 30/60/90/120-min threshold crossed by `activeSeconds` that hasn't fired yet today. */
 export function nextUnshownThreshold(
   activeSeconds: number,
   interruptsShown: number[],
@@ -113,7 +113,7 @@ export function nextUnshownThreshold(
   return null;
 }
 
-/** True once today's active playback reaches the non-negotiable 120-minute cap. */
+/** True once today's active playback reaches the non-negotiable 150-minute (2.5h) cap. */
 export function hasReachedCap(activeSeconds: number): boolean {
   return activeSeconds >= CAP_MINUTES * 60;
 }
@@ -136,7 +136,12 @@ export function decideGuardianActions(params: {
   capReached: boolean;
   isFullscreen: boolean;
 }): GuardianAction[] {
-  const capping = !params.capReached && hasReachedCap(params.activeSeconds);
+  // Already locked: nothing fires, ever, for the rest of the day — not even a late/out-of-sync
+  // threshold (e.g. a cross-tab race where capReached synced before interruptsShown finished
+  // converging). "No dismiss, no extend, no keep-watching" applies from the first lock onward.
+  if (params.capReached) return [];
+
+  const capping = hasReachedCap(params.activeSeconds);
   const threshold = capping ? null : nextUnshownThreshold(params.activeSeconds, params.interruptsShown);
   if (!capping && threshold === null) return [];
 

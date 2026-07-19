@@ -136,16 +136,6 @@ export type RankContext = {
   config: RankingConfig;
 };
 
-// --- Watch Later (IndexedDB v3; PHASE_3_SPEC.md §3/§5) -------------------------
-// A full Video snapshot saved at click time + the save timestamp. Storing the whole
-// Video means the Watch Later surface renders entirely from IndexedDB with ZERO added
-// YouTube Data API quota (PHASE_3_SPEC §7). Read back for display only — not an
-// external-API boundary, but schema-defined so the saved shape stays in lockstep with Video.
-export const WatchLaterEntrySchema = VideoSchema.extend({
-  addedAt: z.string(), // ISO timestamp the user saved it
-});
-export type WatchLaterEntry = z.infer<typeof WatchLaterEntrySchema>;
-
 // --- Session limiter (IndexedDB v3; PHASE_3_SPEC.md §3/§5) ---------------------
 // One active-playback segment. The rolling-window limiter sums these to decide when to
 // prompt a break (PRD §6 / context.md §5). `endedAt` is kept fresh by a heartbeat while a
@@ -273,10 +263,13 @@ export type SuppressedChannel = z.infer<typeof SuppressedChannelSchema>;
 // monotonic across writes/tabs. `interruptsShown` records which of the 30/60/90-minute
 // thresholds have already fired today (each fires at most once). `capReached` latches true at
 // 120 active minutes and stays true for the rest of the day regardless of further playback.
+// interruptsShown accepts 30/60/90/120 (the current threshold set, cap raised to 150min). A
+// record written before that change only ever contains 30/60/90 — those parse unchanged (a
+// subset of an already-permissive union), so there is no migration that can crash on old data.
 export const WatchSessionSchema = z.object({
   date: z.string(), // local YYYY-MM-DD
   activeSeconds: z.number().int().nonnegative(),
-  interruptsShown: z.array(z.union([z.literal(30), z.literal(60), z.literal(90)])),
+  interruptsShown: z.array(z.union([z.literal(30), z.literal(60), z.literal(90), z.literal(120)])),
   capReached: z.boolean(),
 });
 export type WatchSession = z.infer<typeof WatchSessionSchema>;
@@ -297,3 +290,31 @@ export const GuardianSettingsSchema = z.object({
   whatsappNumber: z.string(), // digits only, international format (no leading "+" or spaces)
 });
 export type GuardianSettings = z.infer<typeof GuardianSettingsSchema>;
+
+// --- Playlists (IndexedDB; snapshot-on-save, zero quota to render) ------------------------
+// A playlist is just a named bucket; `isSystem` marks the one fixed "Watch Later" row (id
+// "watch-later") as undeletable/unrenamable. Per-browser/local, same limitation as watch state
+// and channel additions — shaped to migrate to a per-user DB row at the account rewrite.
+export const PlaylistSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  createdAt: z.string(),
+  isSystem: z.boolean(),
+});
+export type Playlist = z.infer<typeof PlaylistSchema>;
+
+// A full metadata SNAPSHOT taken at add-time — rendering a playlist never re-resolves saved
+// videos (zero API calls). Accepted limitation: a snapshot's title/thumbnail won't update if
+// the source video is later renamed/re-thumbnailed.
+export const PlaylistItemSchema = z.object({
+  id: z.string(), // `${playlistId}:${videoId}` — unique row id, also this store's keyPath
+  playlistId: z.string(),
+  videoId: z.string(),
+  title: z.string(),
+  thumbnailUrl: z.string(),
+  channelId: z.string(),
+  channelTitle: z.string(),
+  durationSec: z.number().int().nonnegative(),
+  addedAt: z.string(),
+});
+export type PlaylistItem = z.infer<typeof PlaylistItemSchema>;

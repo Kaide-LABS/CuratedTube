@@ -139,7 +139,7 @@ export function GuardianOverlay({
   return (
     <div className={overlayBase}>
       <div className={cardBase}>
-        <h2 className="text-lg font-semibold text-zinc-100">You&rsquo;ve reached today&rsquo;s 2-hour limit.</h2>
+        <h2 className="text-lg font-semibold text-zinc-100">You&rsquo;ve reached today&rsquo;s 2.5-hour limit.</h2>
         <p className="mt-2 text-sm text-zinc-400">HalalTube is closed until tomorrow.</p>
       </div>
     </div>
