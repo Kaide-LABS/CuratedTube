@@ -5,6 +5,8 @@ import { WatchPlayer } from "@/components/WatchPlayer";
 import { MetadataPanel } from "@/components/MetadataPanel";
 import { VideoPreviewCard } from "@/components/VideoPreviewCard";
 import { WatchLaterButton } from "@/components/WatchLaterButton";
+import { AddToQueueButton } from "@/components/AddToQueueButton";
+import { AddToPlaylistButton } from "@/components/AddToPlaylistButton";
 import { PlaylistWatchView } from "@/components/PlaylistWatchView";
 
 // Dynamic: Data API reads use `cache: "no-store"` (the ETag/304 layer governs quota spend).
@@ -50,7 +52,11 @@ export default async function WatchPage({
             )}
             <span className="text-sm font-medium text-zinc-200">{video.channelTitle}</span>
           </Link>
-          <WatchLaterButton video={video} />
+          <div className="flex items-center gap-2">
+            <AddToQueueButton video={video} />
+            <AddToPlaylistButton video={video} />
+            <WatchLaterButton video={video} />
+          </div>
         </div>
       </div>
 

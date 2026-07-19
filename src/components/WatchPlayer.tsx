@@ -93,12 +93,29 @@ function loadIframeApi(): Promise<void> {
 
 // YouTube IFrame player state codes (only PLAYING is "active" for the focus limiter + guardian).
 const YT_PLAYING = 1;
+const YT_ENDED = 0;
 const GUARDIAN_HEARTBEAT_MS = 15_000;
 
-export function WatchPlayer({ videoId }: { videoId: string }) {
+export function WatchPlayer({
+  videoId,
+  onEnded,
+}: {
+  videoId: string;
+  /**
+   * Fires when the video ends naturally. ONLY ever wired up for queue playback (see
+   * PlaylistWatchView) to advance to the next user-queued item — the ONE sanctioned auto-advance
+   * in the app, and only within an explicit, user-built queue. Never used for autoplay-of-
+   * recommendations; every other caller of WatchPlayer omits this prop and nothing advances.
+   */
+  onEnded?: () => void;
+}) {
   const router = useRouter();
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YTPlayer | null>(null);
+  const onEndedRef = useRef(onEnded);
+  useEffect(() => {
+    onEndedRef.current = onEnded;
+  }, [onEnded]);
   // Focus-limiter bookkeeping: the currently-open active-playback segment + its heartbeat timer.
   // The heartbeat keeps the persisted segment's endedAt fresh so an abandoned tab cannot inflate
   // active time (PHASE_3_SPEC §6). None of this advances playback — it only records activity.
@@ -316,6 +333,11 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
             } else {
               stopGuardianHeartbeat();
             }
+
+            // Queue-advance (see the onEnded prop doc above): fires only for a caller that
+            // opted in, only on a natural ENDED transition — never on pause/buffering, never
+            // wired up outside queue playback.
+            if (e.data === YT_ENDED) onEndedRef.current?.();
           },
         },
       });

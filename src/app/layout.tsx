@@ -46,6 +46,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 Playlists
               </Link>
               <Link
+                href="/queue"
+                className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Queue
+              </Link>
+              <Link
                 href="/channels"
                 className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
               >

@@ -120,6 +120,6 @@ describe("playing from a playlist is NOT a cap bypass (static guarantee)", () =>
     // Reuses the shared WatchPlayer (and therefore its mount-time capped check, staged
     // interrupts, and heartbeat) rather than re-implementing or bypassing any of it.
     expect(source).toMatch(/import\s*\{\s*WatchPlayer\s*\}\s*from\s*"\.\/WatchPlayer"/);
-    expect(source).toMatch(/<WatchPlayer\s+videoId={videoId}\s*\/>/);
+    expect(source).toMatch(/<WatchPlayer\s+videoId={videoId}/);
   });
 });

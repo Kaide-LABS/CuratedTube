@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { z } from "zod";
 import { RosterRowSchema, VideoSchema, type PlaylistItem, type Video } from "@/lib/types";
 import { mergeRosterRows } from "@/lib/channels";
-import { getPlaylistItem, removeFromPlaylist } from "@/lib/playlists";
+import { getNextQueueItem, getPlaylistItem, QUEUE_PLAYLIST_ID, removeFromPlaylist } from "@/lib/playlists";
 import { getUserChannels } from "@/lib/userChannels";
 import { getSuppressedChannels } from "@/lib/suppressedChannels";
 import { WatchPlayer } from "./WatchPlayer";
@@ -76,16 +76,29 @@ export function PlaylistWatchView({ videoId, playlistId }: { videoId: string; pl
 
   async function onRemove(): Promise<void> {
     await removeFromPlaylist(playlistId, videoId);
-    router.push(`/playlists/${playlistId}`);
+    router.push(playlistId === QUEUE_PLAYLIST_ID ? "/queue" : `/playlists/${playlistId}`);
+  }
+
+  // The ONE sanctioned auto-advance in the app (see WatchPlayer's onEnded doc): only wired up
+  // for the reserved queue, only on a natural end, only to the NEXT item the user themselves
+  // queued. No wrap-around, no fallback to recommendations — running off the end just stops.
+  async function onQueueEnded(): Promise<void> {
+    if (playlistId !== QUEUE_PLAYLIST_ID) return;
+    const next = await getNextQueueItem(videoId);
+    if (next) router.push(`/watch/${next.videoId}?list=${QUEUE_PLAYLIST_ID}`);
   }
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6 p-4 lg:grid lg:grid-cols-3">
       <div className="lg:col-span-2">
-        <WatchPlayer videoId={videoId} />
+        <WatchPlayer videoId={videoId} onEnded={playlistId === QUEUE_PLAYLIST_ID ? () => void onQueueEnded() : undefined} />
         <div className="border-b border-zinc-800 py-4">
           <h1 className="text-lg font-semibold leading-snug text-zinc-100">{item.title}</h1>
-          <p className="mt-2 text-sm text-zinc-500">Saved to this playlist — playing from a snapshot.</p>
+          <p className="mt-2 text-sm text-zinc-500">
+            {playlistId === QUEUE_PLAYLIST_ID
+              ? "Playing from your queue — the next queued video plays automatically when this one ends."
+              : "Saved to this playlist — playing from a snapshot."}
+          </p>
         </div>
         <div className="mt-4 flex items-center justify-between gap-3">
           <Link href={`/channel/${item.channelId}`} className="flex items-center gap-3 hover:opacity-90">
@@ -96,7 +109,7 @@ export function PlaylistWatchView({ videoId, playlistId }: { videoId: string; pl
             onClick={() => void onRemove()}
             className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-zinc-900"
           >
-            Remove from playlist
+            {playlistId === QUEUE_PLAYLIST_ID ? "Remove from queue" : "Remove from playlist"}
           </button>
         </div>
       </div>

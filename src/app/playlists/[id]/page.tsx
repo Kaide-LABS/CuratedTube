@@ -1,12 +1,16 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
 import type { Playlist, PlaylistItem } from "@/lib/types";
 import {
+  clearQueue,
   deletePlaylist,
+  enqueue,
   getPlaylistItems,
   getPlaylists,
+  QUEUE_PLAYLIST_ID,
   removeFromPlaylist,
   renamePlaylist,
 } from "@/lib/playlists";
@@ -16,6 +20,7 @@ import { CaughtUpBlocker } from "@/components/CaughtUpBlocker";
 /** One playlist's snapshot items. Renders entirely from IndexedDB — zero API calls. */
 export default function PlaylistDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const [playlist, setPlaylist] = useState<Playlist | null | undefined>(undefined);
   const [items, setItems] = useState<PlaylistItem[]>([]);
   const [renaming, setRenaming] = useState(false);
@@ -50,6 +55,23 @@ export default function PlaylistDetailPage({ params }: { params: Promise<{ id: s
   async function onDelete(): Promise<void> {
     await deletePlaylist(id);
     window.location.href = "/playlists";
+  }
+
+  /** Optional nice-to-have: loads this playlist's items into the queue, in order, then opens it. */
+  async function onPlayAll(): Promise<void> {
+    if (items.length === 0) return;
+    await clearQueue();
+    for (const it of items) {
+      await enqueue({
+        videoId: it.videoId,
+        title: it.title,
+        thumbnailUrl: it.thumbnailUrl,
+        channelId: it.channelId,
+        channelTitle: it.channelTitle,
+        durationSec: it.durationSec,
+      });
+    }
+    router.push(`/watch/${items[0].videoId}?list=${QUEUE_PLAYLIST_ID}`);
   }
 
   if (playlist === undefined) {
@@ -88,6 +110,11 @@ export default function PlaylistDetailPage({ params }: { params: Promise<{ id: s
           )}
         </div>
         <div className="flex items-center gap-3">
+          {items.length > 0 && (
+            <button type="button" onClick={() => void onPlayAll()} className="text-sm text-zinc-500 hover:text-zinc-300">
+              Play all
+            </button>
+          )}
           {!playlist.isSystem && !renaming && (
             <>
               <button type="button" onClick={() => setRenaming(true)} className="text-sm text-zinc-500 hover:text-zinc-300">

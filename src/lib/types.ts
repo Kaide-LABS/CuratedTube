@@ -295,17 +295,22 @@ export type GuardianSettings = z.infer<typeof GuardianSettingsSchema>;
 // A playlist is just a named bucket; `isSystem` marks the one fixed "Watch Later" row (id
 // "watch-later") as undeletable/unrenamable. Per-browser/local, same limitation as watch state
 // and channel additions — shaped to migrate to a per-user DB row at the account rewrite.
+// `isQueue` marks the one reserved, ordered play-next queue (fixed id "queue", isSystem:true,
+// isQueue:true) — optional so existing Playlist rows (Watch Later, user playlists) written
+// before this field existed still parse unchanged (absent -> not a queue).
 export const PlaylistSchema = z.object({
   id: z.string(),
   name: z.string(),
   createdAt: z.string(),
   isSystem: z.boolean(),
+  isQueue: z.boolean().optional(),
 });
 export type Playlist = z.infer<typeof PlaylistSchema>;
 
 // A full metadata SNAPSHOT taken at add-time — rendering a playlist never re-resolves saved
 // videos (zero API calls). Accepted limitation: a snapshot's title/thumbnail won't update if
-// the source video is later renamed/re-thumbnailed.
+// the source video is later renamed/re-thumbnailed. `order` is only meaningful for the queue
+// (ordered play-next); ordinary playlist items leave it unset and sort by addedAt instead.
 export const PlaylistItemSchema = z.object({
   id: z.string(), // `${playlistId}:${videoId}` — unique row id, also this store's keyPath
   playlistId: z.string(),
@@ -316,5 +321,6 @@ export const PlaylistItemSchema = z.object({
   channelTitle: z.string(),
   durationSec: z.number().int().nonnegative(),
   addedAt: z.string(),
+  order: z.number().int().nonnegative().optional(),
 });
 export type PlaylistItem = z.infer<typeof PlaylistItemSchema>;

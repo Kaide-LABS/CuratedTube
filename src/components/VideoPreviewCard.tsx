@@ -3,6 +3,7 @@ import type { Video } from "@/lib/types";
 import { formatCount, timeAgo } from "@/lib/format";
 import { TimeBadge } from "./TimeBadge";
 import { AddToPlaylistButton } from "./AddToPlaylistButton";
+import { AddToQueueButton } from "./AddToQueueButton";
 
 export function VideoPreviewCard({
   video,
@@ -15,9 +16,10 @@ export function VideoPreviewCard({
 }) {
   return (
     <div className="group relative flex flex-col gap-2">
-      {/* A <button> can't nest inside an <a>, so the playlist button sits as a sibling,
-          positioned over the thumbnail corner of the (still fully clickable) Link below. */}
-      <div className="absolute right-2 top-2 z-10 opacity-0 transition-opacity group-hover:opacity-100">
+      {/* A <button> can't nest inside an <a>, so these sit as siblings, positioned over the
+          thumbnail corner of the (still fully clickable) Link below. */}
+      <div className="absolute right-2 top-2 z-10 flex gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <AddToQueueButton video={video} />
         <AddToPlaylistButton video={video} />
       </div>
       <Link

@@ -8,6 +8,7 @@ import { DEFAULT_RANKING_CONFIG } from "@/lib/ranking-config";
 import { getImpressionMap, getWatchSignals, recordImpressions } from "@/lib/watchState";
 import { getUserChannels } from "@/lib/userChannels";
 import { getSuppressedChannels } from "@/lib/suppressedChannels";
+import { filterByKeyword } from "@/lib/search";
 import { z } from "zod";
 import { CategoryFilterBar, type CategoryOption } from "./CategoryFilterBar";
 import { VideoPreviewCard } from "./VideoPreviewCard";
@@ -40,6 +41,7 @@ export function HomeFeed({ pool }: { pool: Video[] }) {
   }, [effectivePool]);
 
   const [selected, setSelected] = useState<CategoryOption>("All");
+  const [query, setQuery] = useState("");
   const [visited, setVisited] = useState<Set<string>>(new Set());
   const [impressions, setImpressions] = useState<Map<string, ImpressionState>>(new Map());
   // Ranking depends on the current time (video ages) and on client-only IndexedDB signals, so
@@ -132,22 +134,44 @@ export function HomeFeed({ pool }: { pool: Video[] }) {
       : buildHomeFeed(effectivePool, undefined, HOME_FEED_CAP);
   }, [effectivePool, selected, mounted, ctx]);
 
-  // Anti-repetition: record an impression for the ranked videos actually shown (idempotent per
-  // session). Only the "All" view feeds the cross-session penalty; category browsing does not.
+  // Pure in-memory filter over the already-ranked/loaded rows — zero API calls, zero quota.
+  // Literal keyword matching only (see search.ts): "-term" hides matches.
+  const filteredView = useMemo(() => filterByKeyword(view, query), [view, query]);
+
+  // Anti-repetition: record an impression for the ranked videos ACTUALLY SHOWN (post-filter) —
+  // idempotent per session. Only the "All" view feeds the cross-session penalty; category
+  // browsing does not.
   useEffect(() => {
-    if (!mounted || selected !== "All" || view.length === 0) return;
-    void recordImpressions(view.map((v) => v.videoId));
-  }, [mounted, selected, view]);
+    if (!mounted || selected !== "All" || filteredView.length === 0) return;
+    void recordImpressions(filteredView.map((v) => v.videoId));
+  }, [mounted, selected, filteredView]);
 
   return (
     <div className="px-4 py-6">
       <CategoryFilterBar options={options} selected={selected} onSelect={setSelected} />
-      <div className="grid grid-cols-1 gap-5 pt-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {view.map((v) => (
-          <VideoPreviewCard key={v.videoId} video={v} visited={visited.has(v.videoId)} />
-        ))}
-        <CaughtUpBlocker count={view.length} />
+      <div className="mt-4">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter your feed… (try -term to hide matches)"
+          className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+        />
+        <p className="mt-1 text-xs text-zinc-600">
+          Matches literal words in titles only — it won&rsquo;t catch videos that mean the same
+          thing without using the word.
+        </p>
       </div>
+      {filteredView.length === 0 ? (
+        <p className="px-4 py-16 text-center text-sm text-zinc-500">No videos match that filter.</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 pt-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {filteredView.map((v) => (
+            <VideoPreviewCard key={v.videoId} video={v} visited={visited.has(v.videoId)} />
+          ))}
+          <CaughtUpBlocker count={filteredView.length} />
+        </div>
+      )}
     </div>
   );
 }

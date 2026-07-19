@@ -2,10 +2,12 @@
 // watchGuardian.ts split: the I/O layer (playlists.ts) is a thin, degrade-silently IndexedDB
 // wrapper; the actual decisions live here, unit-testable without any storage.
 
-import type { Playlist } from "./types";
+import type { Playlist, PlaylistItem } from "./types";
 
 export const WATCH_LATER_PLAYLIST_ID = "watch-later";
 export const WATCH_LATER_PLAYLIST_NAME = "Watch Later";
+export const QUEUE_PLAYLIST_ID = "queue";
+export const QUEUE_PLAYLIST_NAME = "Queue";
 
 /** A playlist item's IndexedDB row id — also its store's keyPath, unique per (playlist, video). */
 export function playlistItemId(playlistId: string, videoId: string): string {
@@ -32,10 +34,72 @@ export function isPlaylistMutable(playlist: Pick<Playlist, "isSystem">): boolean
   return !playlist.isSystem;
 }
 
+/**
+ * The reserved queue is a play-order mechanism, not a saved collection — it's excluded from the
+ * generic "Add to playlist" picker / library list (isBrowsablePlaylist), reachable only via its
+ * own dedicated /queue surface and the separate "Add to queue" action.
+ */
+export function isBrowsablePlaylist(playlist: Pick<Playlist, "isQueue">): boolean {
+  return !playlist.isQueue;
+}
+
 /** Stable ordering: system playlists (Watch Later) first, then user playlists newest-first. */
 export function sortPlaylists(playlists: Playlist[]): Playlist[] {
   return [...playlists].sort((a, b) => {
     if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1;
     return b.createdAt.localeCompare(a.createdAt);
   });
+}
+
+/**
+ * Idempotent resolution of the reserved Queue system playlist — same construction as
+ * {@link resolveEnsuredWatchLater} (fixed id, returned unchanged if it already exists, race-safe
+ * by construction since the id is never derived/randomized).
+ */
+export function resolveEnsuredQueue(existing: Playlist | undefined, nowIso: string): Playlist {
+  if (existing) return existing;
+  return { id: QUEUE_PLAYLIST_ID, name: QUEUE_PLAYLIST_NAME, createdAt: nowIso, isSystem: true, isQueue: true };
+}
+
+/** The next append-order value for the queue: one past the current max (0 for an empty queue). */
+export function nextOrderValue(items: Pick<PlaylistItem, "order">[]): number {
+  return items.reduce((max, it) => Math.max(max, it.order ?? -1), -1) + 1;
+}
+
+/**
+ * Move a queued item one slot up or down by swapping its `order` with its adjacent neighbor's.
+ * A no-op (returns `items` unchanged) at either end of the queue. Pure — the caller persists
+ * whichever items actually changed.
+ */
+export function swapOrder(
+  items: PlaylistItem[],
+  videoId: string,
+  direction: "up" | "down",
+): PlaylistItem[] {
+  const sorted = [...items].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const idx = sorted.findIndex((it) => it.videoId === videoId);
+  if (idx === -1) return items;
+  const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= sorted.length) return items;
+  const a = sorted[idx];
+  const b = sorted[swapIdx];
+  const aOrder = a.order;
+  const bOrder = b.order;
+  return items.map((it) => {
+    if (it.videoId === a.videoId) return { ...it, order: bOrder };
+    if (it.videoId === b.videoId) return { ...it, order: aOrder };
+    return it;
+  });
+}
+
+/**
+ * The queue item immediately after `currentVideoId` in order, or null if `currentVideoId` is
+ * last (or not found) — end of a user-built queue means playback simply stops, never falls back
+ * to autoplay/recommendations.
+ */
+export function nextQueueItem(items: PlaylistItem[], currentVideoId: string): PlaylistItem | null {
+  const sorted = [...items].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const idx = sorted.findIndex((it) => it.videoId === currentVideoId);
+  if (idx === -1 || idx === sorted.length - 1) return null;
+  return sorted[idx + 1];
 }
