@@ -46,6 +46,23 @@ No Shorts surface · no comments · no autoplay-next · no infinite scroll · no
 finite 24-item home ending in a caught-up block · same-channel rail only on watch ·
 no metric optimizes for time-on-app.
 
+## Watch-time guardian
+
+A self-imposed discipline layer on the watch page: staged check-ins at 30/60/90 active minutes
+and a non-negotiable 2-hour (120-minute) daily cap, both measured from real playback time
+(timestamp deltas on player state changes, never `setInterval` tick-counting — a backgrounded
+tab would undercount ticks). State lives in IndexedDB (`watchSession`, per local calendar day),
+is monotonic across writes, and converges across tabs via `BroadcastChannel`. The 30/60/90
+thresholds and the 2h cap are **not** editable anywhere in the UI — self-binding is the point.
+The only editable setting is the preset WhatsApp contact used by the check-in's "Message
+someone" door (`/settings`).
+
+**Accepted limitation:** this is client-side, IndexedDB-backed state. It can be cleared via
+DevTools, a private window, or a fresh browser profile, and there is no server-side enforcement.
+This is intentional — the guardian is self-binding discipline (a tool you point at yourself), not
+SENTINEL-grade tamper-proof enforcement, and the code does not pretend otherwise or attempt any
+anti-clear tricks. See `src/lib/watchGuardian.ts` for the full accounting/clock-guard logic.
+
 ## Deploy
 
 Deploy to Vercel: import the repo (Next.js auto-detected), set `YOUTUBE_API_KEY` as a **server-side**

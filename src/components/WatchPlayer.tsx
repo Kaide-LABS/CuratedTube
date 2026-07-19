@@ -1,14 +1,34 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { markVisited } from "@/lib/watchState";
 import { recordActiveSegment } from "@/lib/sessionStore";
 import { mergeSegment } from "@/lib/session";
 import { DEFAULT_SESSION_CONFIG } from "@/lib/session-config";
-import type { SessionSegment } from "@/lib/types";
+import type { SessionSegment, WatchSession } from "@/lib/types";
+import {
+  buildChatGptCheckinUrl,
+  buildWhatsAppLink,
+  decideGuardianActions,
+  localDateKey,
+  tickActive,
+  type GuardianAction,
+  type GuardianClock,
+  type InterruptThresholdMin,
+} from "@/lib/watchGuardian";
+import {
+  broadcastSession,
+  getGuardianSettings,
+  getTodaySession,
+  saveSession,
+  subscribeGuardianBroadcast,
+  addJournalEntry,
+} from "@/lib/watchGuardianStore";
+import { GuardianOverlay, type GuardianOverlayState } from "./WatchGuardianOverlays";
 
 // Minimal typings for the IFrame Player API surface we use.
-type YTPlayer = { destroy: () => void };
+type YTPlayer = { destroy: () => void; pauseVideo: () => void; playVideo: () => void };
 type YTPlayerEvent = { data: number };
 type YTErrorEvent = { data: number };
 declare global {
@@ -36,6 +56,13 @@ declare global {
 // in-channel only; iv_load_policy=3 hides annotations; playsinline=1 avoids forced iOS
 // fullscreen. modestbranding is deprecated (Aug 2023, no effect) and is OMITTED per the
 // locked set in CuratedTube_PRD.md §10 / CuratedTube_context.md §8.
+//
+// enablejsapi=1 (required for pauseVideo()/playVideo() and state-change events, which both the
+// focus limiter below and the watch-time guardian depend on) is NOT listed here because it isn't
+// a playerVars key you set yourself — the official IFrame Player API script (loaded via
+// loadIframeApi() below and constructed with `new YT.Player(...)`) always adds it to the
+// embedded iframe's URL automatically. A raw hand-built <iframe src="..."> would need it added
+// manually; this component never builds one.
 const PLAYER_VARS = {
   rel: 0,
   controls: 1,
@@ -64,10 +91,12 @@ function loadIframeApi(): Promise<void> {
   return apiLoading;
 }
 
-// YouTube IFrame player state codes (only PLAYING is "active" for the session limiter).
+// YouTube IFrame player state codes (only PLAYING is "active" for the focus limiter + guardian).
 const YT_PLAYING = 1;
+const GUARDIAN_HEARTBEAT_MS = 15_000;
 
 export function WatchPlayer({ videoId }: { videoId: string }) {
+  const router = useRouter();
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   // Focus-limiter bookkeeping: the currently-open active-playback segment + its heartbeat timer.
@@ -76,6 +105,63 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
   const openSegRef = useRef<SessionSegment | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [errored, setErrored] = useState(false);
+
+  // --- Watch-time guardian bookkeeping (self-binding 2h/day cap + 30/60/90 staged interrupts).
+  // A wholly separate mechanic from the focus limiter above: that one is a soft, snoozable,
+  // rolling-4h-window nudge; this one is a hard, non-snoozable, per-calendar-day cap. See
+  // watchGuardian.ts for the accepted-limitation note (client-side, not tamper-proof).
+  const guardianClockRef = useRef<GuardianClock>({ activeSec: 0, openStartedAtMs: null });
+  const interruptsShownRef = useRef<InterruptThresholdMin[]>([]);
+  const capReachedRef = useRef(false);
+  const todayKeyRef = useRef<string>(localDateKey(Date.now()));
+  const isPlayingRef = useRef(false);
+  const guardianHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [guardianReady, setGuardianReady] = useState(false);
+  const [overlay, setOverlay] = useState<GuardianOverlayState>({ kind: "none" });
+  const [whatsappNumber, setWhatsappNumber] = useState("");
+
+  // Resolve today's session (clock-guard reconciled) + settings BEFORE the player is allowed to
+  // exist, so an already-capped day never even loads the IFrame API (the "guard at player
+  // creation" invariant).
+  useEffect(() => {
+    let alive = true;
+    const now = Date.now();
+    Promise.all([getTodaySession(now), getGuardianSettings()]).then(([session, settings]) => {
+      if (!alive) return;
+      guardianClockRef.current = { activeSec: session.activeSeconds, openStartedAtMs: null };
+      interruptsShownRef.current = session.interruptsShown;
+      capReachedRef.current = session.capReached;
+      todayKeyRef.current = session.date;
+      setWhatsappNumber(settings.whatsappNumber);
+      if (session.capReached) setOverlay({ kind: "locked" });
+      setGuardianReady(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Adopt another tab's progress (multi-tab safety): merge, never regress, and reflect a cap
+  // reached in another tab immediately (a second tab shouldn't be able to keep playing past it).
+  useEffect(() => {
+    return subscribeGuardianBroadcast((incoming) => {
+      if (incoming.date !== todayKeyRef.current) return;
+      guardianClockRef.current = {
+        ...guardianClockRef.current,
+        activeSec: Math.max(guardianClockRef.current.activeSec, incoming.activeSeconds),
+      };
+      interruptsShownRef.current = [...new Set([...interruptsShownRef.current, ...incoming.interruptsShown])];
+      if (incoming.capReached && !capReachedRef.current) {
+        capReachedRef.current = true;
+        try {
+          playerRef.current?.pauseVideo();
+        } catch {
+          /* noop */
+        }
+        setOverlay({ kind: "locked" });
+      }
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,6 +174,12 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
         heartbeatRef.current = null;
       }
     };
+    const stopGuardianHeartbeat = (): void => {
+      if (guardianHeartbeatRef.current !== null) {
+        clearInterval(guardianHeartbeatRef.current);
+        guardianHeartbeatRef.current = null;
+      }
+    };
 
     // Close any open segment (paused/ended/unmount) and persist it. Never starts a new video.
     const closeSegment = (): void => {
@@ -96,6 +188,81 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
       stopHeartbeat();
       if (seg) void recordActiveSegment(seg);
     };
+
+    // Advance the guardian clock, persist (monotonic), broadcast to other tabs, and — the
+    // mandatory ordering — exitFullscreen BEFORE the overlay, force-pause, THEN show it. Never
+    // resumes playback itself; every resume path is an explicit button handler below.
+    const checkGuardian = async (now: number, playing: boolean): Promise<void> => {
+      const todayKey = localDateKey(now);
+      if (todayKey !== todayKeyRef.current) {
+        // Midnight rollover mid-session: start the new day's clock fresh; playback itself is
+        // untouched (only the accounting resets).
+        guardianClockRef.current = { activeSec: 0, openStartedAtMs: playing ? now : null };
+        interruptsShownRef.current = [];
+        capReachedRef.current = false;
+        todayKeyRef.current = todayKey;
+      } else {
+        guardianClockRef.current = tickActive(guardianClockRef.current, now, playing);
+      }
+
+      const activeSeconds = Math.floor(guardianClockRef.current.activeSec);
+      const actions: GuardianAction[] = decideGuardianActions({
+        activeSeconds,
+        interruptsShown: interruptsShownRef.current,
+        capReached: capReachedRef.current,
+        isFullscreen: typeof document !== "undefined" && Boolean(document.fullscreenElement),
+      });
+
+      for (const action of actions) {
+        if (action.type === "exitFullscreen") {
+          try {
+            await document.exitFullscreen();
+          } catch {
+            /* best effort — some browsers reject exitFullscreen outside a user gesture */
+          }
+        } else if (action.type === "pause") {
+          try {
+            playerRef.current?.pauseVideo();
+          } catch {
+            /* noop */
+          }
+        } else if (action.type === "showInterrupt") {
+          interruptsShownRef.current = [...interruptsShownRef.current, action.minutes];
+          setOverlay({ kind: "interrupt1", minutes: action.minutes });
+        } else if (action.type === "showLocked") {
+          capReachedRef.current = true;
+          setOverlay({ kind: "locked" });
+        }
+      }
+
+      const toSave: WatchSession = {
+        date: todayKeyRef.current,
+        activeSeconds,
+        interruptsShown: interruptsShownRef.current,
+        capReached: capReachedRef.current,
+      };
+      const saved = await saveSession(toSave);
+      broadcastSession(saved);
+      // Adopt the monotonic-merged truth back in case another tab was ahead of this one.
+      guardianClockRef.current = { ...guardianClockRef.current, activeSec: saved.activeSeconds };
+      interruptsShownRef.current = saved.interruptsShown;
+      capReachedRef.current = saved.capReached;
+    };
+
+    const onVisibilityOrHide = (): void => {
+      void checkGuardian(Date.now(), isPlayingRef.current);
+    };
+    document.addEventListener("visibilitychange", onVisibilityOrHide);
+    window.addEventListener("pagehide", onVisibilityOrHide);
+
+    // Never even loads the IFrame API for an already-capped day (guard at player creation).
+    if (!guardianReady || capReachedRef.current) {
+      return () => {
+        cancelled = true;
+        document.removeEventListener("visibilitychange", onVisibilityOrHide);
+        window.removeEventListener("pagehide", onVisibilityOrHide);
+      };
+    }
 
     loadIframeApi().then(() => {
       if (cancelled || !hostRef.current || !window.YT?.Player) return;
@@ -116,11 +283,13 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
           onError: () => {
             setErrored(true);
           },
-          // Focus limiter only: open/extend an active segment while PLAYING, close it otherwise.
-          // ENDED (data === 0) closes the segment and does NOTHING else — there is NO autoplay
-          // and NO next-video load (PRD §2 non-negotiable / PHASE_3_SPEC §9).
           onStateChange: (e) => {
             const playing = e.data === YT_PLAYING;
+            isPlayingRef.current = playing;
+
+            // Focus limiter (unchanged): open/extend an active segment while PLAYING, close it
+            // otherwise. ENDED (data === 0) closes the segment and does NOTHING else — there is
+            // NO autoplay and NO next-video load (PRD §2 non-negotiable / PHASE_3_SPEC §9).
             if (playing) {
               openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
               if (openSegRef.current) void recordActiveSegment(openSegRef.current);
@@ -134,6 +303,19 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
             } else {
               closeSegment();
             }
+
+            // Guardian: check on every state change, and only heartbeat-checkpoint while playing
+            // (mirrors the focus limiter's own heartbeat gating just above).
+            void checkGuardian(Date.now(), playing);
+            if (playing) {
+              if (guardianHeartbeatRef.current === null) {
+                guardianHeartbeatRef.current = setInterval(() => {
+                  void checkGuardian(Date.now(), true);
+                }, GUARDIAN_HEARTBEAT_MS);
+              }
+            } else {
+              stopGuardianHeartbeat();
+            }
           },
         },
       });
@@ -141,7 +323,11 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
 
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibilityOrHide);
+      window.removeEventListener("pagehide", onVisibilityOrHide);
       closeSegment();
+      stopGuardianHeartbeat();
+      void checkGuardian(Date.now(), false);
       try {
         playerRef.current?.destroy();
       } catch {
@@ -149,7 +335,74 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
       }
       playerRef.current = null;
     };
-  }, [videoId]);
+  }, [videoId, guardianReady]);
+
+  // --- Guardian overlay action handlers — every resume path is an explicit user choice here. ---
+
+  function onDoneForNow(): void {
+    setOverlay({ kind: "none" });
+    router.push("/");
+  }
+
+  function onProceedToCheckin(): void {
+    setOverlay((prev) => (prev.kind === "interrupt1" ? { kind: "checkin", minutes: prev.minutes } : prev));
+  }
+
+  function destroyPlayer(): void {
+    try {
+      playerRef.current?.pauseVideo();
+      playerRef.current?.destroy();
+    } catch {
+      /* noop */
+    }
+    playerRef.current = null;
+  }
+
+  function onStepAway(): void {
+    destroyPlayer();
+    setOverlay({ kind: "steppedAway" });
+  }
+
+  function onMessageSomeone(): void {
+    if (!whatsappNumber) return;
+    try {
+      window.open(buildWhatsAppLink(whatsappNumber), "_blank", "noopener,noreferrer");
+    } catch {
+      /* the AI/messaging doors are optional and powerless — a failure to open changes nothing */
+    }
+  }
+
+  function onGoToJournal(): void {
+    setOverlay((prev) => (prev.kind === "checkin" ? { kind: "journal", minutes: prev.minutes, saved: false } : prev));
+  }
+
+  function onSaveJournal(text: string): void {
+    if (!text.trim()) return;
+    const now = new Date();
+    void addJournalEntry({ date: localDateKey(now.getTime()), text: text.trim(), createdAt: now.toISOString() });
+    setOverlay((prev) => (prev.kind === "journal" ? { ...prev, saved: true } : prev));
+  }
+
+  function onTalkToAI(): void {
+    try {
+      window.open(buildChatGptCheckinUrl(), "_blank", "noopener,noreferrer");
+    } catch {
+      /* optional and powerless — see invariants; the guardian behaves identically either way */
+    }
+  }
+
+  function onResume(): void {
+    setOverlay({ kind: "none" });
+    try {
+      playerRef.current?.playVideo();
+    } catch {
+      /* noop */
+    }
+  }
+
+  function onBackToFeed(): void {
+    router.push("/");
+  }
 
   if (errored) {
     return (
@@ -170,9 +423,24 @@ export function WatchPlayer({ videoId }: { videoId: string }) {
   }
 
   return (
-    <div className="aspect-video w-full overflow-hidden rounded-xl bg-black shadow-2xl">
-      {/* The API replaces this div with the player iframe. */}
-      <div ref={hostRef} className="h-full w-full" />
-    </div>
+    <>
+      <div className="aspect-video w-full overflow-hidden rounded-xl bg-black shadow-2xl">
+        {/* The API replaces this div with the player iframe. */}
+        <div ref={hostRef} className="h-full w-full" />
+      </div>
+      <GuardianOverlay
+        state={overlay}
+        whatsappNumber={whatsappNumber}
+        onDoneForNow={onDoneForNow}
+        onProceedToCheckin={onProceedToCheckin}
+        onStepAway={onStepAway}
+        onMessageSomeone={onMessageSomeone}
+        onGoToJournal={onGoToJournal}
+        onSaveJournal={onSaveJournal}
+        onTalkToAI={onTalkToAI}
+        onResume={onResume}
+        onBackToFeed={onBackToFeed}
+      />
+    </>
   );
 }

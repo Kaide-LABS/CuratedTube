@@ -45,6 +45,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               >
                 Channels
               </Link>
+              <Link
+                href="/settings"
+                className="text-sm font-medium text-zinc-400 hover:text-zinc-200"
+              >
+                Settings
+              </Link>
               <InstallPrompt />
               <QuotaBadge />
             </div>

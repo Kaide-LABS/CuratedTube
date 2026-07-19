@@ -2,22 +2,26 @@
 // Single-user, no backend. v1 stored watch state (visited videos) to de-emphasize watched cards.
 // v2 added an `impressions` store (anti-repetition signal for the Phase 2 ranker). v3 added the
 // `watchLater` and `session` stores (Phase 3). v4 added `userChannels` (add-channels-by-URL
-// overlay). v5 adds `suppressedChannels` (hide-any-channel overlay). This module owns the
-// SINGLE DB-open path and the full schema; watchLater.ts, sessionStore.ts, userChannels.ts, and
-// suppressedChannels.ts reuse the exported `openDB`/`tx`. Every migration is additive and
-// idempotent from a fresh state (v1 through v5).
+// overlay). v5 added `suppressedChannels` (hide-any-channel overlay). v6 adds `watchSession`,
+// `journalEntries`, and `guardianSettings` (watch-time guardian: 2h/day active-playback cap).
+// This module owns the SINGLE DB-open path and the full schema; watchLater.ts, sessionStore.ts,
+// userChannels.ts, suppressedChannels.ts, and watchGuardianStore.ts reuse the exported
+// `openDB`/`tx`. Every migration is additive and idempotent from a fresh state (v1 through v6).
 "use client";
 
 import type { ImpressionState, WatchState } from "./types";
 
 const DB_NAME = "curatedtube";
-const DB_VERSION = 5; // v4 -> v5: add `suppressedChannels` (all prior stores preserved)
+const DB_VERSION = 6; // v5 -> v6: add `watchSession`/`journalEntries`/`guardianSettings` (all prior stores preserved)
 const WATCH_STORE = "watchState";
 const IMPRESSION_STORE = "impressions";
 const WATCH_LATER_STORE = "watchLater";
 const SESSION_STORE = "session";
 const USER_CHANNELS_STORE = "userChannels";
 const SUPPRESSED_CHANNELS_STORE = "suppressedChannels";
+const WATCH_SESSION_STORE = "watchSession";
+const JOURNAL_ENTRIES_STORE = "journalEntries";
+const GUARDIAN_SETTINGS_STORE = "guardianSettings";
 
 /**
  * Open (and migrate) the shared `curatedtube` IndexedDB. The single DB-open path for every
@@ -53,6 +57,15 @@ export function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SUPPRESSED_CHANNELS_STORE)) {
         db.createObjectStore(SUPPRESSED_CHANNELS_STORE, { keyPath: "channelId" });
+      }
+      if (!db.objectStoreNames.contains(WATCH_SESSION_STORE)) {
+        db.createObjectStore(WATCH_SESSION_STORE, { keyPath: "date" });
+      }
+      if (!db.objectStoreNames.contains(JOURNAL_ENTRIES_STORE)) {
+        db.createObjectStore(JOURNAL_ENTRIES_STORE, { keyPath: "createdAt" });
+      }
+      if (!db.objectStoreNames.contains(GUARDIAN_SETTINGS_STORE)) {
+        db.createObjectStore(GUARDIAN_SETTINGS_STORE, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);

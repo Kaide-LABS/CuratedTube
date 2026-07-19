@@ -261,3 +261,39 @@ export const SuppressedChannelSchema = z.object({
   suppressedAt: z.string(), // ISO timestamp the user hid it
 });
 export type SuppressedChannel = z.infer<typeof SuppressedChannelSchema>;
+
+// --- Watch-time guardian (IndexedDB; self-binding 2h/day active-playback cap) -------------
+// ACCEPTED LIMITATION: this is client-side, IndexedDB-backed state. It can be cleared via
+// DevTools, a private window, or a fresh browser profile — there is no server-side enforcement
+// and no attempt to prevent that. This is self-binding discipline (a tool you point at
+// yourself), not SENTINEL-grade tamper-proof enforcement, and the code never pretends otherwise.
+//
+// One record per local calendar day (`date`, keyed YYYY-MM-DD). `activeSeconds` is real
+// timestamp-delta playback time (never setInterval tick-counting — see watchGuardian.ts),
+// monotonic across writes/tabs. `interruptsShown` records which of the 30/60/90-minute
+// thresholds have already fired today (each fires at most once). `capReached` latches true at
+// 120 active minutes and stays true for the rest of the day regardless of further playback.
+export const WatchSessionSchema = z.object({
+  date: z.string(), // local YYYY-MM-DD
+  activeSeconds: z.number().int().nonnegative(),
+  interruptsShown: z.array(z.union([z.literal(30), z.literal(60), z.literal(90)])),
+  capReached: z.boolean(),
+});
+export type WatchSession = z.infer<typeof WatchSessionSchema>;
+
+// --- Journal entry (IndexedDB; private, local-only "write it down" check-in note) ---------
+export const JournalEntrySchema = z.object({
+  date: z.string(), // local YYYY-MM-DD, the day it was written
+  text: z.string(),
+  createdAt: z.string(), // ISO timestamp; also the store's keyPath (unique per entry)
+});
+export type JournalEntry = z.infer<typeof JournalEntrySchema>;
+
+// --- Guardian settings (IndexedDB; single row) --------------------------------------------
+// The ONLY user-editable guardian setting. The 2h cap and the 30/60/90 thresholds are NOT
+// editable from the UI — self-binding is the point (PRD invariant).
+export const GuardianSettingsSchema = z.object({
+  id: z.literal("default"),
+  whatsappNumber: z.string(), // digits only, international format (no leading "+" or spaces)
+});
+export type GuardianSettings = z.infer<typeof GuardianSettingsSchema>;
