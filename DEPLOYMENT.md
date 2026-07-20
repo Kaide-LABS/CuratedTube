@@ -30,12 +30,50 @@ Phase 4 (Hardening) deployment guide. HalalTube is a single-user, server-rendere
 ### Security headers / CSP
 
 Headers are defined once in [`next.config.mjs`](next.config.mjs) (`headers()`), so there is no
-conflicting policy. The CSP permits the YouTube IFrame player (`frame-src https://www.youtube.com`)
-and its API/asset hosts, blocks framing of HalalTube itself (`frame-ancestors 'none'`), and ships
-`nosniff`, `Referrer-Policy`, `HSTS`, and a locked-down `Permissions-Policy`. `script-src`/`style-src`
-keep `'unsafe-inline'` because the App Router emits inline hydration scripts without a nonce; a
-nonce-based tightening (request middleware) is a candidate future hardening, intentionally out of
-scope for this deploy step.
+conflicting policy. The CSP permits ONLY the nocookie player (`frame-src
+https://www.youtube-nocookie.com`) — `www.youtube.com` and `s.ytimg.com` are NOT in `script-src`,
+`frame-src`, or `media-src` at all, since the player is self-hosted (see "Self-hosted player"
+below) and never loads anything from those two hosts. It blocks framing of HalalTube itself
+(`frame-ancestors 'none'`), and ships `nosniff`, `Referrer-Policy`, `HSTS`, and a locked-down
+`Permissions-Policy`. `script-src`/`style-src` keep `'unsafe-inline'` because the App Router emits
+inline hydration scripts without a nonce; a nonce-based tightening (request middleware) is a
+candidate future hardening, intentionally out of scope for this deploy step.
+
+### Self-hosted player (no www.youtube.com dependency)
+
+The player is a raw `<iframe src="https://www.youtube-nocookie.com/embed/...">`, driven directly
+by the undocumented postMessage "widget" protocol (`src/lib/youtubeWidget.ts`) — **not** the
+official `https://www.youtube.com/iframe_api` bootstrap script. This means `www.youtube.com` can
+be fully DNS/router-blocked (§4 below) without breaking playback, since HalalTube never loads a
+script from it. `s.ytimg.com` (the old bootstrap script's own dependency) is gone for the same
+reason.
+
+**ACCEPTED RISK:** this protocol (the "listening" handshake, `onStateChange`/`infoDelivery` event
+shapes, player-state integers) is undocumented and reverse-engineered from observed traffic — the
+same risk class as the UULF playlist-prefix convention. It may change without notice.
+`src/lib/youtubeWidget.ts` is the entire swappable event-source layer; if YouTube changes the wire
+format, only that file (and its tests) should need to change.
+
+**Embed-restricted fallback, updated:** a video that can't be embedded (owner-restricted,
+region/age-locked) shows a "can't be embedded and isn't available under the current network
+block" message. It does **not** offer a live "Watch on YouTube" link — with `www.youtube.com`
+DNS-blocked, that link would point at a sinkholed domain. The raw watch URL is shown as inert,
+selectable text only, for lookup on another, unblocked device.
+
+**Host set:** the nocookie embed needs, at minimum, `www.youtube-nocookie.com` (the player
+document) and `*.googlevideo.com` (actual media segments — the player UI loads but nothing plays
+without this). Thumbnails/avatars are `*.ytimg.com` / `*.ggpht.com` / `yt3.googleusercontent.com`,
+already unaffected by this change. **This list has not been independently confirmed against live
+network traffic from a real network egress** — this environment's own network intercepts
+connections to `youtube.com`/`youtube-nocookie.com` (an untrusted-certificate MITM was observed
+when testing directly), so a from-scratch traffic capture with `www.youtube.com` DNS-blocked
+could not be completed here. **Verify this yourself** before relying on it for a router/DNS
+allowlist: open DevTools → Network (with "preserve log" and no request blocking) on `/watch/<id>`,
+play a full video, and note every distinct host across the top frame AND the player iframe's own
+requests. Widen the allowlist if anything unexpected shows up (past reports of extras like
+`jnn-pa.googleapis.com`, `fonts.gstatic.com`, or `play.google.com` exist for some embed
+configurations — none of these are assumed present or absent without you having actually seen
+them in your own capture).
 
 ## 3. Quota & resilience (what hardening bought)
 
@@ -57,14 +95,17 @@ scope for this deploy step.
 
 Once HalalTube is live and pinned, remove the rabbit hole at the source:
 
-- **Router / DNS:** block `youtube.com`, `m.youtube.com`, `youtubei.googleapis.com` at your router
-  or via a DNS sink (Pi-hole / NextDNS). HalalTube’s **player iframe still works** because it loads
-  from `www.youtube.com` *embedded* — if you sink the whole domain, allowlist `www.youtube.com` and
-  `*.googlevideo.com` (playback), and block the `/feed`, `/shorts`, `/results` browse paths instead.
+- **Router / DNS:** block `www.youtube.com`, `youtube.com`, `m.youtube.com`,
+  `youtubei.googleapis.com` at your router or via a DNS sink (Pi-hole / NextDNS) — **fully**, no
+  allowlist exception needed for `www.youtube.com` itself. HalalTube's player is self-hosted
+  against `www.youtube-nocookie.com` (see "Self-hosted player" above) and never loads anything
+  from `www.youtube.com`. Allowlist `www.youtube-nocookie.com` and `*.googlevideo.com` (actual
+  media playback); leave the browse domain (`youtube.com`'s `/feed`, `/shorts`, `/results`, and
+  the whole domain besides those two exceptions) blocked.
 - **iOS / Android:** Screen Time / Digital Wellbeing → block the YouTube app + `youtube.com` in the
   browser; add HalalTube to the Home Screen (PWA) as the sanctioned entry point.
-- **Desktop:** a hosts-file entry or an extension that blocks the YouTube homepage/Shorts/search while
-  leaving `/watch` embeds intact.
+- **Desktop:** a hosts-file entry blocking `www.youtube.com` outright now works cleanly (no
+  embed-breaking side effect) — no need for a homepage/Shorts/search-only extension rule.
 
 ## 5. iOS PWA storage — [VERIFY] closed (PRD §10, non-blocking)
 

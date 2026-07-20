@@ -5,21 +5,29 @@
 // script/style ('unsafe-inline') because the Next.js App Router injects inline bootstrap/hydration
 // scripts without a nonce; a nonce-based tightening would require request middleware and is a
 // candidate future hardening, not part of this deploy step. The policy DOES restrict framing and
-// connections to exactly what HalalTube needs: the YouTube IFrame player and its asset host.
+// connections to exactly what HalalTube needs: the YouTube nocookie player and its asset hosts.
+//
+// TIGHTENED (self-hosted player rewrite): www.youtube.com and s.ytimg.com are gone from
+// script-src/frame-src/media-src. The player used to bootstrap via the official
+// https://www.youtube.com/iframe_api script; it's now a raw <iframe src="youtube-nocookie.com/
+// embed/...">  driven directly by the postMessage widget protocol (src/lib/youtubeWidget.ts) —
+// no script from youtube.com is loaded at all, so HalalTube works with www.youtube.com fully
+// DNS/router-blocked. This is not just a header edit: `next build` + a live play/pause/seek/end
+// pass under THIS tightened policy is the proof nothing still depends on those hosts.
 const csp = [
   "default-src 'self'",
-  // Next inline bootstrap + the YouTube IFrame API (www.youtube.com) and its widget host (s.ytimg.com).
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.youtube.com https://s.ytimg.com",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   // Thumbnails (i/i1–i9.ytimg.com mirrors) + avatars (yt3.ggpht.com / yt3.googleusercontent.com)
   // + data/blob for inlined assets. The *.ytimg.com wildcard covers every thumbnail mirror host
   // YouTube rotates through, so a thumbnail never gets CSP-refused for being served from i9 vs i.
   "img-src 'self' data: blob: https://i.ytimg.com https://i9.ytimg.com https://*.ytimg.com https://yt3.ggpht.com https://*.ggpht.com https://yt3.googleusercontent.com",
   "font-src 'self' data:",
-  // The player iframe only. The Data API is called server-side; googleapis is allowed for safety.
-  "frame-src https://www.youtube.com https://www.youtube-nocookie.com",
+  // The nocookie player iframe only. The Data API is called server-side; googleapis is allowed
+  // for safety even though no client-side fetch ever targets it.
+  "frame-src https://www.youtube-nocookie.com",
   "connect-src 'self' https://www.googleapis.com",
-  "media-src 'self' https://www.youtube.com",
+  "media-src 'self' https://www.youtube-nocookie.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

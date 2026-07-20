@@ -65,6 +65,51 @@ describe("tickActive — timestamp-delta accounting (never setInterval tick-coun
     const clock: GuardianClock = { activeSec: 12, openStartedAtMs: null };
     expect(tickActive(clock, 99_999, false)).toEqual(clock);
   });
+
+  it("PLAYING 10s -> BUFFERING 4s -> PLAYING 6s -> PAUSED = exactly 16s (BUFFERING is not playing)", () => {
+    // This is the self-hosted player's actual state map (PLAYER_STATE.BUFFERING = 3): a seek/
+    // scrub reports BUFFERING, which tickActive must treat identically to PAUSED — not playing,
+    // banked and closed — so a seek can neither lose nor double-count active time.
+    let clock: GuardianClock = { activeSec: 0, openStartedAtMs: null };
+    clock = tickActive(clock, 0, true); // PLAYING at t=0
+    clock = tickActive(clock, 10_000, false); // BUFFERING at t=10s (seek) -> banks 10s
+    expect(clock.activeSec).toBe(10);
+    clock = tickActive(clock, 14_000, true); // PLAYING resumes at t=14s (4s of buffering, uncounted)
+    expect(clock.activeSec).toBe(10); // buffering time never added
+    clock = tickActive(clock, 20_000, false); // PAUSED at t=20s -> banks another 6s
+    expect(clock.activeSec).toBe(16);
+  });
+
+  it("a seek that reports several BUFFERING blips in a row still neither loses nor double-counts", () => {
+    let clock: GuardianClock = { activeSec: 0, openStartedAtMs: null };
+    clock = tickActive(clock, 0, true);
+    clock = tickActive(clock, 5_000, false); // BUFFERING
+    clock = tickActive(clock, 5_100, false); // a second BUFFERING event, still not playing — no-op
+    clock = tickActive(clock, 5_200, false); // a third — still no-op
+    clock = tickActive(clock, 8_000, true); // PLAYING again after the scrub settles
+    clock = tickActive(clock, 11_000, false); // PAUSED
+    expect(clock.activeSec).toBe(5 + 3); // 5s before the seek + 3s after, buffering gap excluded
+  });
+
+  it("duplicate PLAYING events at the same instant (both onStateChange and infoDelivery for one transition) never double-count", () => {
+    let clock: GuardianClock = { activeSec: 0, openStartedAtMs: null };
+    clock = tickActive(clock, 0, true);
+    // The widget protocol can deliver two separate messages for the SAME transition (an
+    // onStateChange AND an infoDelivery, both resolving to PLAYING) — both call tickActive with
+    // playing=true at (near) the same timestamp; this must bank only the true elapsed delta.
+    clock = tickActive(clock, 1_000, true);
+    clock = tickActive(clock, 1_000, true); // duplicate event, identical timestamp
+    clock = tickActive(clock, 6_000, false);
+    expect(clock.activeSec).toBe(6); // not 11 — the duplicate at t=1000 added zero extra
+  });
+
+  it("an out-of-order duplicate PAUSED after already paused is a no-op (never subtracts or double-banks)", () => {
+    let clock: GuardianClock = { activeSec: 0, openStartedAtMs: null };
+    clock = tickActive(clock, 0, true);
+    clock = tickActive(clock, 5_000, false); // PAUSED, banks 5s
+    clock = tickActive(clock, 5_050, false); // a stale duplicate PAUSED arrives slightly late
+    expect(clock.activeSec).toBe(5);
+  });
 });
 
 describe("mergeMonotonic — multi-tab safety, never regresses", () => {

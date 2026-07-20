@@ -10,7 +10,11 @@ HalalTube reproduces YouTube's *useful* surfaces — a discovery feed, channel p
 - **Next.js (App Router) + TypeScript + Tailwind v4** — server-side Data API calls keep the key server-only.
 - **YouTube Data API v3** — `playlistItems.list` / `videos.list` / `channels.list` only. **Never `search.list`** (100× quota).
 - **RSS** (`feeds/videos.xml?playlist_id=UULF…`) — zero-quota new-upload detection.
-- **IFrame Player API** — distraction-suppressed playback with an embed-restriction fallback.
+- **Self-hosted nocookie player** — a raw `youtube-nocookie.com` embed driven directly by the
+  postMessage widget protocol (`src/lib/youtubeWidget.ts`), not the official
+  `www.youtube.com/iframe_api` script — so `www.youtube.com` can be fully DNS-blocked without
+  breaking playback. Distraction-suppressed params + an embed-restriction fallback (see
+  DEPLOYMENT.md §"Self-hosted player").
 - **IndexedDB** — local watch state (single-user, no backend).
 
 ## Getting started

@@ -13,7 +13,6 @@ import {
   decideGuardianActions,
   localDateKey,
   tickActive,
-  type GuardianAction,
   type GuardianClock,
   type InterruptThresholdMin,
 } from "@/lib/watchGuardian";
@@ -25,75 +24,34 @@ import {
   subscribeGuardianBroadcast,
   addJournalEntry,
 } from "@/lib/watchGuardianStore";
+import {
+  buildCommandMessage,
+  buildEmbedUrl,
+  buildListeningMessage,
+  isTrustedWidgetOrigin,
+  nextPauseAttemptOutcome,
+  NOCOOKIE_ORIGIN,
+  parseWidgetMessage,
+  PLAYER_STATE,
+} from "@/lib/youtubeWidget";
 import { GuardianOverlay, type GuardianOverlayState } from "./WatchGuardianOverlays";
 
-// Minimal typings for the IFrame Player API surface we use.
-type YTPlayer = { destroy: () => void; pauseVideo: () => void; playVideo: () => void };
-type YTPlayerEvent = { data: number };
-type YTErrorEvent = { data: number };
-declare global {
-  interface Window {
-    YT?: {
-      Player: new (
-        el: HTMLElement,
-        opts: {
-          host?: string;
-          videoId: string;
-          playerVars: Record<string, number | string>;
-          events: {
-            onReady?: () => void;
-            onStateChange?: (e: YTPlayerEvent) => void;
-            onError?: (e: YTErrorEvent) => void;
-          };
-        },
-      ) => YTPlayer;
-    };
-    onYouTubeIframeAPIReady?: () => void;
-  }
-}
-
-// Locked distraction-suppressing params (Pass A, 2026-06-29). rel=0 keeps related videos
-// in-channel only; iv_load_policy=3 hides annotations; playsinline=1 avoids forced iOS
-// fullscreen. modestbranding is deprecated (Aug 2023, no effect) and is OMITTED per the
-// locked set in CuratedTube_PRD.md §10 / CuratedTube_context.md §8.
-//
-// enablejsapi=1 (required for pauseVideo()/playVideo() and state-change events, which both the
-// focus limiter below and the watch-time guardian depend on) is NOT listed here because it isn't
-// a playerVars key you set yourself — the official IFrame Player API script (loaded via
-// loadIframeApi() below and constructed with `new YT.Player(...)`) always adds it to the
-// embedded iframe's URL automatically. A raw hand-built <iframe src="..."> would need it added
-// manually; this component never builds one.
-const PLAYER_VARS = {
-  rel: 0,
-  controls: 1,
-  playsinline: 1,
-  iv_load_policy: 3,
-  disablekb: 0,
-  fs: 1,
-  color: "white",
-} as const;
-
-let apiLoading: Promise<void> | null = null;
-function loadIframeApi(): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  if (window.YT?.Player) return Promise.resolve();
-  if (apiLoading) return apiLoading;
-  apiLoading = new Promise<void>((resolve) => {
-    const prev = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      prev?.();
-      resolve();
-    };
-    const tag = document.createElement("script");
-    tag.src = "https://www.youtube.com/iframe_api";
-    document.head.appendChild(tag);
-  });
-  return apiLoading;
-}
-
-// YouTube IFrame player state codes (only PLAYING is "active" for the focus limiter + guardian).
-const YT_PLAYING = 1;
-const YT_ENDED = 0;
+// Self-hosted player: a raw <iframe src="https://www.youtube-nocookie.com/embed/...">, driven
+// entirely by the postMessage "widget" protocol (src/lib/youtubeWidget.ts) — NOT the official
+// https://www.youtube.com/iframe_api bootstrap script. This is the whole point: HalalTube must
+// keep working with www.youtube.com fully DNS/router-blocked (see README's block-YouTube
+// runbook). ACCEPTED RISK: the widget protocol is undocumented/reverse-engineered and may change
+// without notice — youtubeWidget.ts is the entire swappable event-source layer; nothing below
+// touches the raw postMessage shape directly.
+const HANDSHAKE_RETRY_MS = 300;
+// ~30s of retrying before giving up on ever hearing back. Empirically necessary (not a guess):
+// a first-attempt-only or short-timeout handshake measurably fails against a real nocookie embed
+// — the iframe's contentWindow doesn't reflect the cross-origin navigation (and so won't accept
+// a postMessage targeted at that origin) until the navigation actually commits, which is
+// slower than a few hundred ms in practice. Harmless to keep retrying: each attempt is one small
+// postMessage, and it stops the instant any real message comes back.
+const HANDSHAKE_MAX_ATTEMPTS = 100;
+const PAUSE_CONFIRM_TIMEOUT_MS = 1500;
 const GUARDIAN_HEARTBEAT_MS = 15_000;
 
 export function WatchPlayer({
@@ -110,20 +68,23 @@ export function WatchPlayer({
   onEnded?: () => void;
 }) {
   const router = useRouter();
-  const hostRef = useRef<HTMLDivElement>(null);
-  const playerRef = useRef<YTPlayer | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const onEndedRef = useRef(onEnded);
   useEffect(() => {
     onEndedRef.current = onEnded;
   }, [onEnded]);
+
+  const [embedSrc, setEmbedSrc] = useState<string | null>(null);
+  const [playerMounted, setPlayerMounted] = useState(true);
+  const [errored, setErrored] = useState(false);
+
   // Focus-limiter bookkeeping: the currently-open active-playback segment + its heartbeat timer.
   // The heartbeat keeps the persisted segment's endedAt fresh so an abandoned tab cannot inflate
   // active time (PHASE_3_SPEC §6). None of this advances playback — it only records activity.
   const openSegRef = useRef<SessionSegment | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [errored, setErrored] = useState(false);
 
-  // --- Watch-time guardian bookkeeping (self-binding 2h/day cap + 30/60/90 staged interrupts).
+  // --- Watch-time guardian bookkeeping (self-binding 2.5h/day cap + 30/60/90/120 interrupts).
   // A wholly separate mechanic from the focus limiter above: that one is a soft, snoozable,
   // rolling-4h-window nudge; this one is a hard, non-snoozable, per-calendar-day cap. See
   // watchGuardian.ts for the accepted-limitation note (client-side, not tamper-proof).
@@ -137,8 +98,16 @@ export function WatchPlayer({
   const [overlay, setOverlay] = useState<GuardianOverlayState>({ kind: "none" });
   const [whatsappNumber, setWhatsappNumber] = useState("");
 
+  // Force-pause verification (per PART 2): resolved by the message handler when a PAUSED state
+  // event actually arrives. A "pause" the guardian can't confirm must never be trusted — see
+  // pauseAndConfirm below.
+  const pendingPauseResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const handshakeIdRef = useRef(0);
+  const handshakeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const handshakeAckedRef = useRef(false);
+
   // Resolve today's session (clock-guard reconciled) + settings BEFORE the player is allowed to
-  // exist, so an already-capped day never even loads the IFrame API (the "guard at player
+  // exist, so an already-capped day never even renders the iframe (the "guard at player
   // creation" invariant).
   useEffect(() => {
     let alive = true;
@@ -150,7 +119,10 @@ export function WatchPlayer({
       capReachedRef.current = session.capReached;
       todayKeyRef.current = session.date;
       setWhatsappNumber(settings.whatsappNumber);
-      if (session.capReached) setOverlay({ kind: "locked" });
+      if (session.capReached) {
+        setPlayerMounted(false);
+        setOverlay({ kind: "locked" });
+      }
       setGuardianReady(true);
     });
     return () => {
@@ -159,7 +131,7 @@ export function WatchPlayer({
   }, []);
 
   // Adopt another tab's progress (multi-tab safety): merge, never regress, and reflect a cap
-  // reached in another tab immediately (a second tab shouldn't be able to keep playing past it).
+  // reached in another tab immediately — a second tab shouldn't be able to keep playing past it.
   useEffect(() => {
     return subscribeGuardianBroadcast((incoming) => {
       if (incoming.date !== todayKeyRef.current) return;
@@ -170,15 +142,25 @@ export function WatchPlayer({
       interruptsShownRef.current = [...new Set([...interruptsShownRef.current, ...incoming.interruptsShown])];
       if (incoming.capReached && !capReachedRef.current) {
         capReachedRef.current = true;
-        try {
-          playerRef.current?.pauseVideo();
-        } catch {
-          /* noop */
-        }
+        setPlayerMounted(false); // deterministic — element removal, not a command
         setOverlay({ kind: "locked" });
       }
     });
   }, []);
+
+  // Compute the embed src from the REAL runtime origin (never hardcoded — localhost in dev, the
+  // run.app host in prod). Also resets all PER-VIDEO state (handshake, pause-confirmation,
+  // playing flag) without touching the daily guardian state (clock/interruptsShown/capReached),
+  // which must persist across a video change within the same day.
+  useEffect(() => {
+    if (!guardianReady || capReachedRef.current) return;
+    handshakeIdRef.current += 1;
+    handshakeAckedRef.current = false;
+    pendingPauseResolveRef.current = null;
+    isPlayingRef.current = false;
+    setErrored(false);
+    setEmbedSrc(buildEmbedUrl(videoId, window.location.origin));
+  }, [videoId, guardianReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,6 +179,12 @@ export function WatchPlayer({
         guardianHeartbeatRef.current = null;
       }
     };
+    const stopHandshakeRetry = (): void => {
+      if (handshakeTimerRef.current !== null) {
+        clearInterval(handshakeTimerRef.current);
+        handshakeTimerRef.current = null;
+      }
+    };
 
     // Close any open segment (paused/ended/unmount) and persist it. Never starts a new video.
     const closeSegment = (): void => {
@@ -206,9 +194,65 @@ export function WatchPlayer({
       if (seg) void recordActiveSegment(seg);
     };
 
-    // Advance the guardian clock, persist (monotonic), broadcast to other tabs, and — the
-    // mandatory ordering — exitFullscreen BEFORE the overlay, force-pause, THEN show it. Never
-    // resumes playback itself; every resume path is an explicit button handler below.
+    const postToPlayer = (msg: unknown): void => {
+      const win = iframeRef.current?.contentWindow;
+      if (!win) return;
+      try {
+        win.postMessage(JSON.stringify(msg), NOCOOKIE_ORIGIN);
+      } catch {
+        /* noop — a failed postMessage just means this attempt is lost, callers retry/escalate */
+      }
+    };
+
+    // The "listening" handshake — without it, the widget never posts back a single event. Sent
+    // immediately and retried on an interval (the exact timing of the widget's internal readiness
+    // relative to the iframe's native `load` event is not guaranteed) until we've heard ANY
+    // message back, or we give up after HANDSHAKE_MAX_ATTEMPTS.
+    const startHandshake = (): void => {
+      stopHandshakeRetry();
+      let attempts = 0;
+      const send = (): void => {
+        attempts += 1;
+        postToPlayer(buildListeningMessage(handshakeIdRef.current));
+        if (attempts >= HANDSHAKE_MAX_ATTEMPTS) stopHandshakeRetry();
+      };
+      send();
+      handshakeTimerRef.current = setInterval(send, HANDSHAKE_RETRY_MS);
+    };
+
+    // Force-pause verification (PART 2): send pauseVideo, wait for a PAUSED state event within
+    // PAUSE_CONFIRM_TIMEOUT_MS. Unconfirmed -> retry once -> still unconfirmed -> tell the caller
+    // to unmount. Never resolves "confirmed" without an actual PAUSED event.
+    const attemptPause = (): Promise<boolean> => {
+      return new Promise((resolve) => {
+        pendingPauseResolveRef.current = resolve;
+        postToPlayer(buildCommandMessage("pauseVideo"));
+        setTimeout(() => {
+          if (pendingPauseResolveRef.current === resolve) {
+            pendingPauseResolveRef.current = null;
+            resolve(false);
+          }
+        }, PAUSE_CONFIRM_TIMEOUT_MS);
+      });
+    };
+    const pauseAndConfirm = async (): Promise<boolean> => {
+      let attempt = 0;
+      for (;;) {
+        attempt += 1;
+        const confirmed = await attemptPause();
+        const outcome = nextPauseAttemptOutcome(confirmed, attempt);
+        if (outcome === "confirmed") return true;
+        if (outcome === "escalate") return false;
+        // "retry" — loop again.
+      }
+    };
+
+    // Advance the guardian clock, persist (monotonic), broadcast to other tabs. Mandatory
+    // ordering: exitFullscreen BEFORE the overlay; the cap is enforced by UNMOUNTING the iframe
+    // (deterministic — never trusts a postMessage command); an interrupt sends pauseVideo and
+    // only shows the interstitial once a PAUSED event actually confirms it, escalating to
+    // unmount if it never does. Never resumes playback itself — every resume is an explicit
+    // button handler below.
     const checkGuardian = async (now: number, playing: boolean): Promise<void> => {
       const todayKey = localDateKey(now);
       if (todayKey !== todayKeyRef.current) {
@@ -223,7 +267,7 @@ export function WatchPlayer({
       }
 
       const activeSeconds = Math.floor(guardianClockRef.current.activeSec);
-      const actions: GuardianAction[] = decideGuardianActions({
+      const actions = decideGuardianActions({
         activeSeconds,
         interruptsShown: interruptsShownRef.current,
         capReached: capReachedRef.current,
@@ -237,19 +281,20 @@ export function WatchPlayer({
           } catch {
             /* best effort — some browsers reject exitFullscreen outside a user gesture */
           }
-        } else if (action.type === "pause") {
-          try {
-            playerRef.current?.pauseVideo();
-          } catch {
-            /* noop */
-          }
-        } else if (action.type === "showInterrupt") {
-          interruptsShownRef.current = [...interruptsShownRef.current, action.minutes];
-          setOverlay({ kind: "interrupt1", minutes: action.minutes });
         } else if (action.type === "showLocked") {
+          // The 2.5h cap: element removal, not a command. Deterministic regardless of whether
+          // the iframe would have honored a pause message.
+          setPlayerMounted(false);
           capReachedRef.current = true;
           setOverlay({ kind: "locked" });
+        } else if (action.type === "showInterrupt") {
+          const confirmed = await pauseAndConfirm();
+          if (!confirmed) setPlayerMounted(false); // never show the interstitial over a maybe-still-playing video
+          interruptsShownRef.current = [...interruptsShownRef.current, action.minutes];
+          setOverlay({ kind: "interrupt1", minutes: action.minutes });
         }
+        // action.type === "pause" (standalone) never appears without a showInterrupt/showLocked
+        // right after it (see decideGuardianActions) — handled inline above, not here.
       }
 
       const toSave: WatchSession = {
@@ -266,98 +311,92 @@ export function WatchPlayer({
       capReachedRef.current = saved.capReached;
     };
 
+    const handleStateChange = (state: number): void => {
+      const playing = state === PLAYER_STATE.PLAYING;
+      isPlayingRef.current = playing;
+
+      // Focus limiter (unchanged): open/extend an active segment while PLAYING, close it
+      // otherwise. ENDED closes the segment and does NOTHING else — there is NO autoplay and NO
+      // next-video load (PRD §2 non-negotiable / PHASE_3_SPEC §9) except the one sanctioned
+      // queue-advance via onEnded, wired up only by PlaylistWatchView.
+      if (playing) {
+        openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
+        if (openSegRef.current) void recordActiveSegment(openSegRef.current);
+        if (heartbeatRef.current === null) {
+          heartbeatRef.current = setInterval(() => {
+            if (!openSegRef.current) return;
+            openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
+            if (openSegRef.current) void recordActiveSegment(openSegRef.current);
+          }, DEFAULT_SESSION_CONFIG.heartbeatSeconds * 1000);
+        }
+      } else {
+        closeSegment();
+      }
+
+      // Resolve a pending force-pause verification the instant a real PAUSED event arrives.
+      if (state === PLAYER_STATE.PAUSED && pendingPauseResolveRef.current) {
+        const resolve = pendingPauseResolveRef.current;
+        pendingPauseResolveRef.current = null;
+        resolve(true);
+      }
+
+      // Guardian: check on every state change, and only heartbeat-checkpoint while playing
+      // (mirrors the focus limiter's own heartbeat gating just above).
+      void checkGuardian(Date.now(), playing);
+      if (playing) {
+        if (guardianHeartbeatRef.current === null) {
+          guardianHeartbeatRef.current = setInterval(() => {
+            void checkGuardian(Date.now(), true);
+          }, GUARDIAN_HEARTBEAT_MS);
+        }
+      } else {
+        stopGuardianHeartbeat();
+      }
+
+      if (state === PLAYER_STATE.ENDED) onEndedRef.current?.();
+    };
+
+    const onMessage = (event: MessageEvent): void => {
+      if (!isTrustedWidgetOrigin(event.origin)) return;
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      const widgetEvent = parseWidgetMessage(event.data);
+      if (widgetEvent.type === "unknown") return;
+
+      // Any real message proves the channel is alive — stop retry-handshaking.
+      if (!handshakeAckedRef.current) {
+        handshakeAckedRef.current = true;
+        stopHandshakeRetry();
+      }
+
+      if (widgetEvent.type === "error") {
+        setErrored(true);
+        return;
+      }
+      if (widgetEvent.type === "stateChange") {
+        handleStateChange(widgetEvent.state);
+      }
+    };
+    window.addEventListener("message", onMessage);
+
     const onVisibilityOrHide = (): void => {
       void checkGuardian(Date.now(), isPlayingRef.current);
     };
     document.addEventListener("visibilitychange", onVisibilityOrHide);
     window.addEventListener("pagehide", onVisibilityOrHide);
 
-    // Never even loads the IFrame API for an already-capped day (guard at player creation).
-    if (!guardianReady || capReachedRef.current) {
-      return () => {
-        cancelled = true;
-        document.removeEventListener("visibilitychange", onVisibilityOrHide);
-        window.removeEventListener("pagehide", onVisibilityOrHide);
-      };
-    }
-
-    loadIframeApi().then(() => {
-      if (cancelled || !hostRef.current || !window.YT?.Player) return;
-      playerRef.current = new window.YT.Player(hostRef.current, {
-        // Privacy-enhanced embed host: youtube-nocookie.com sets no tracking cookies until the
-        // user plays, and is friendlier to network/DNS blocks of youtube.com proper (the CSP
-        // frame-src allows it — see next.config.mjs). The IFrame API loader script still comes
-        // from www.youtube.com; only the player iframe origin changes.
-        host: "https://www.youtube-nocookie.com",
-        videoId,
-        playerVars: { ...PLAYER_VARS },
-        events: {
-          // Any player error (2 invalid id, 5 HTML5 failure, 100 removed/private, 101/150/153
-          // embedding restricted) => show the "Watch on YouTube" link instead of leaving YouTube's
-          // own cryptic error screen ("An error occurred… Playback ID …") in the iframe (PRD §5.3:
-          // never a blank/dead player). The direct link always works even when embedded playback
-          // fails (owner-disabled embedding, region/age lock, or a browser blocker of googlevideo).
-          onError: () => {
-            setErrored(true);
-          },
-          onStateChange: (e) => {
-            const playing = e.data === YT_PLAYING;
-            isPlayingRef.current = playing;
-
-            // Focus limiter (unchanged): open/extend an active segment while PLAYING, close it
-            // otherwise. ENDED (data === 0) closes the segment and does NOTHING else — there is
-            // NO autoplay and NO next-video load (PRD §2 non-negotiable / PHASE_3_SPEC §9).
-            if (playing) {
-              openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
-              if (openSegRef.current) void recordActiveSegment(openSegRef.current);
-              if (heartbeatRef.current === null) {
-                heartbeatRef.current = setInterval(() => {
-                  if (!openSegRef.current) return;
-                  openSegRef.current = mergeSegment(openSegRef.current, Date.now(), videoId, true);
-                  if (openSegRef.current) void recordActiveSegment(openSegRef.current);
-                }, DEFAULT_SESSION_CONFIG.heartbeatSeconds * 1000);
-              }
-            } else {
-              closeSegment();
-            }
-
-            // Guardian: check on every state change, and only heartbeat-checkpoint while playing
-            // (mirrors the focus limiter's own heartbeat gating just above).
-            void checkGuardian(Date.now(), playing);
-            if (playing) {
-              if (guardianHeartbeatRef.current === null) {
-                guardianHeartbeatRef.current = setInterval(() => {
-                  void checkGuardian(Date.now(), true);
-                }, GUARDIAN_HEARTBEAT_MS);
-              }
-            } else {
-              stopGuardianHeartbeat();
-            }
-
-            // Queue-advance (see the onEnded prop doc above): fires only for a caller that
-            // opted in, only on a natural ENDED transition — never on pause/buffering, never
-            // wired up outside queue playback.
-            if (e.data === YT_ENDED) onEndedRef.current?.();
-          },
-        },
-      });
-    });
+    if (playerMounted && embedSrc) startHandshake();
 
     return () => {
       cancelled = true;
+      window.removeEventListener("message", onMessage);
       document.removeEventListener("visibilitychange", onVisibilityOrHide);
       window.removeEventListener("pagehide", onVisibilityOrHide);
+      stopHandshakeRetry();
       closeSegment();
       stopGuardianHeartbeat();
       void checkGuardian(Date.now(), false);
-      try {
-        playerRef.current?.destroy();
-      } catch {
-        /* noop */
-      }
-      playerRef.current = null;
     };
-  }, [videoId, guardianReady]);
+  }, [videoId, embedSrc, playerMounted]);
 
   // --- Guardian overlay action handlers — every resume path is an explicit user choice here. ---
 
@@ -370,18 +409,8 @@ export function WatchPlayer({
     setOverlay((prev) => (prev.kind === "interrupt1" ? { kind: "checkin", minutes: prev.minutes } : prev));
   }
 
-  function destroyPlayer(): void {
-    try {
-      playerRef.current?.pauseVideo();
-      playerRef.current?.destroy();
-    } catch {
-      /* noop */
-    }
-    playerRef.current = null;
-  }
-
   function onStepAway(): void {
-    destroyPlayer();
+    setPlayerMounted(false);
     setOverlay({ kind: "steppedAway" });
   }
 
@@ -414,12 +443,12 @@ export function WatchPlayer({
   }
 
   function onResume(): void {
+    // Re-mounting a fresh iframe (rather than trying to command a possibly-torn-down one back to
+    // life) is the deterministic choice here too — a new embed always starts from a known state.
+    setErrored(false);
+    setPlayerMounted(true);
+    setEmbedSrc(buildEmbedUrl(videoId, window.location.origin));
     setOverlay({ kind: "none" });
-    try {
-      playerRef.current?.playVideo();
-    } catch {
-      /* noop */
-    }
   }
 
   function onBackToFeed(): void {
@@ -430,16 +459,16 @@ export function WatchPlayer({
     return (
       <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-xl bg-zinc-900 p-6 text-center">
         <p className="text-sm text-zinc-300">
-          This video can&rsquo;t be embedded (the owner restricted external playback).
+          This video can&rsquo;t be embedded and isn&rsquo;t available under the current network
+          block (the owner restricted external playback, and youtube.com itself is blocked on
+          this network).
         </p>
-        <a
-          href={`https://www.youtube.com/watch?v=${videoId}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="rounded-full bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-white"
-        >
-          Watch on YouTube ↗
-        </a>
+        {/* Not a live link — youtube.com is DNS-blocked on this network, so a clickable "Watch on
+            YouTube" button would just point at a sinkholed domain. Shown as inert text only so
+            the same video can be found manually on another, unblocked device. */}
+        <p className="select-all rounded-lg bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-500">
+          https://www.youtube.com/watch?v={videoId}
+        </p>
       </div>
     );
   }
@@ -447,8 +476,17 @@ export function WatchPlayer({
   return (
     <>
       <div className="aspect-video w-full overflow-hidden rounded-xl bg-black shadow-2xl">
-        {/* The API replaces this div with the player iframe. */}
-        <div ref={hostRef} className="h-full w-full" />
+        {playerMounted && embedSrc && (
+          <iframe
+            ref={iframeRef}
+            key={embedSrc}
+            src={embedSrc}
+            title="HalalTube player"
+            className="h-full w-full"
+            allow="autoplay; encrypted-media; picture-in-picture"
+            allowFullScreen
+          />
+        )}
       </div>
       <GuardianOverlay
         state={overlay}
