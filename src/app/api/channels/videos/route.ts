@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getChannelVideos } from "@/lib/data";
+import { FULL_CHANNEL_ARCHIVE_MAX_PAGES, getChannelVideos } from "@/lib/data";
 import { ChannelAdditionSchema } from "@/lib/types";
 import { hasApiKey } from "@/lib/youtube";
 
@@ -10,7 +10,12 @@ export const dynamic = "force-dynamic";
 // channelId/uploadsPlaylistId regexes rather than restating them. Read-only: this route never
 // writes to any roster or store, so a client-supplied (channelId, uploadsPlaylistId) pair is
 // trusted only as far as "fetch this playlist with the server-side key" — never persisted.
-const BodySchema = ChannelAdditionSchema.pick({ channelId: true, uploadsPlaylistId: true });
+// `maxPages` is optional and clamped to the same full-archive ceiling as the base-channel path:
+// a full added-channel page omits it (gets the whole archive); a "more from this channel" rail
+// (PlaylistWatchView) passes a small value since it only needs a handful of recent items.
+const BodySchema = ChannelAdditionSchema.pick({ channelId: true, uploadsPlaylistId: true }).extend({
+  maxPages: z.number().int().positive().max(FULL_CHANNEL_ARCHIVE_MAX_PAGES).optional(),
+});
 
 /**
  * POST /api/channels/videos — a single channel's video archive by (channelId,
@@ -31,7 +36,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
 
   try {
-    const videos = await getChannelVideos(body.channelId, body.uploadsPlaylistId);
+    const videos = await getChannelVideos(body.channelId, body.uploadsPlaylistId, body.maxPages);
     return NextResponse.json({ videos });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error fetching channel videos";

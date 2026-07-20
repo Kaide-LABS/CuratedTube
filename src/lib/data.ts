@@ -18,6 +18,16 @@ import type { ChannelAddition, ChannelMeta, RosterRow, SortMode, Tier, Video } f
 const RSS_PER_CHANNEL = 12; // newest uploads to consider per channel for the home feed
 const HOME_POOL_CAP = 150; // upper bound on enriched videos serialized to the client
 
+// Effectively "the whole archive" for any real creator channel: 100 pages * 50 items/page =
+// 5,000 videos. A channel-page fetch used to default to 4 pages (200 videos), silently
+// truncating older long-form uploads for any channel with more than that — search over "already
+// loaded" videos can only find what got fetched. This is a bound on worst-case quota for one
+// channel-page visit, not a deliberate content limit; a channel with more than 5,000 long-form
+// uploads is vanishingly rare for a personal curation tool. Each page (and each videos.list
+// enrichment batch) is ETag-cached (etagCache.ts) at 0 quota units on an unchanged repeat visit,
+// so this cost is paid once per channel, not on every page load.
+export const FULL_CHANNEL_ARCHIVE_MAX_PAGES = 100;
+
 type FeedChannel = { channelId: string; uploadsPlaylistId: string; tier: Tier; category: string };
 
 /**
@@ -165,23 +175,82 @@ export type ChannelArchive = {
 export async function getChannelVideos(
   channelId: string,
   uploadsPlaylistId: string,
-  maxPages = 4,
+  maxPages = FULL_CHANNEL_ARCHIVE_MAX_PAGES,
 ): Promise<Video[]> {
   const uploads = await getChannelUploads(channelId, { primaryPlaylistId: uploadsPlaylistId, maxPages });
   return enrichWithAvatars(uploads.refs.map((r) => r.videoId), { filterShorts: uploads.usedUU });
 }
 
+// Cross-request cache for the full paginated channel archive (React's `cache()` below only
+// dedupes within a single request/render, not across page visits — see PHASE_4_SPEC-style
+// module comment at the top of this file). Paginating a large channel's full uploads playlist
+// (up to FULL_CHANNEL_ARCHIVE_MAX_PAGES pages) is real quota; without this, re-visiting the same
+// channel page pays that cost again every time — empirically, the Data API's ETag layer
+// (etagCache.ts) does not reliably return conditional 304s for these endpoints, so it can't be
+// relied on alone here. Process-local (stashed on globalThis to survive dev hot-reload), TTL'd
+// so new uploads still surface within a bounded window, and size-bounded like etagCache.ts's own
+// safety valve.
+export type CachedChannelData = { meta: ChannelMeta | null; videos: Video[]; storedAt: number };
+export const CHANNEL_ARCHIVE_TTL_MS = 30 * 60_000; // 30 minutes
+const CHANNEL_ARCHIVE_CACHE_MAX_ENTRIES = 100;
+const gArchive = globalThis as unknown as { __ctChannelArchive?: Map<string, CachedChannelData> };
+
+function store(): Map<string, CachedChannelData> {
+  if (!gArchive.__ctChannelArchive) gArchive.__ctChannelArchive = new Map();
+  return gArchive.__ctChannelArchive;
+}
+
+/** The cached (meta, videos) for `channelId`, or undefined if never cached / evicted. */
+export function getCachedChannelData(channelId: string): CachedChannelData | undefined {
+  return store().get(channelId);
+}
+
+/** Cache (meta, videos) for `channelId`, evicting the oldest entry if at capacity. */
+export function setCachedChannelData(channelId: string, data: Omit<CachedChannelData, "storedAt">): void {
+  const s = store();
+  if (!s.has(channelId) && s.size >= CHANNEL_ARCHIVE_CACHE_MAX_ENTRIES) {
+    const oldest = s.keys().next().value;
+    if (oldest !== undefined) s.delete(oldest);
+  }
+  s.set(channelId, { ...data, storedAt: Date.now() });
+}
+
+/** True when a cached entry for `channelId` is still within the TTL window. */
+export function isChannelDataFresh(cached: CachedChannelData | undefined, now: number): boolean {
+  return cached !== undefined && now - cached.storedAt < CHANNEL_ARCHIVE_TTL_MS;
+}
+
+/** Test/diagnostic helper: clear the entire channel-archive cache. */
+export function clearChannelArchiveCache(): void {
+  store().clear();
+}
+
 /** Channel page: header meta + enriched archive (bounded), sorted by the active tab. */
 export const getChannelArchive = cache(
-  async (channelId: string, sort: SortMode = "latest", maxPages = 4): Promise<ChannelArchive> => {
+  async (
+    channelId: string,
+    sort: SortMode = "latest",
+    maxPages = FULL_CHANNEL_ARCHIVE_MAX_PAGES,
+  ): Promise<ChannelArchive> => {
     const cfg = getChannelConfig(channelId);
     if (!hasApiKey() || !cfg) return { meta: null, videos: [] };
 
-    const [metas, videos] = await Promise.all([
-      getChannelMeta([channelId]),
-      getChannelVideos(channelId, cfg.uploadsPlaylistId, maxPages),
-    ]);
-    return { meta: metas[0] ?? null, videos: sortVideos(videos, sort) };
+    const cached = getCachedChannelData(channelId);
+
+    let meta: ChannelMeta | null;
+    let videos: Video[];
+    if (isChannelDataFresh(cached, Date.now())) {
+      ({ meta, videos } = cached as CachedChannelData);
+    } else {
+      const [metas, fetched] = await Promise.all([
+        getChannelMeta([channelId]),
+        getChannelVideos(channelId, cfg.uploadsPlaylistId, maxPages),
+      ]);
+      meta = metas[0] ?? null;
+      videos = fetched;
+      setCachedChannelData(channelId, { meta, videos });
+    }
+    return { meta, videos: sortVideos(videos, sort) };
   },
 );
 

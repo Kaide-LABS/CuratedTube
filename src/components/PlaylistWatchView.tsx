@@ -54,10 +54,17 @@ export function PlaylistWatchView({ videoId, playlistId }: { videoId: string; pl
         // channel's uploads, never error.
         if (!alive || !row) return;
 
+        // Just a sidebar rail (12 items) — request a single page, not the full-archive default
+        // (matches getWatchData's own same-channel rail, which uses maxPages: 1 for the same
+        // reason: no need to paginate hundreds of videos to show a dozen recent ones).
         const railRes = await fetch("/api/channels/videos", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ channelId: row.channelId, uploadsPlaylistId: row.uploadsPlaylistId }),
+          body: JSON.stringify({
+            channelId: row.channelId,
+            uploadsPlaylistId: row.uploadsPlaylistId,
+            maxPages: 1,
+          }),
         });
         if (!alive || !railRes.ok) return;
         const parsed = VideosResponseSchema.parse(await railRes.json());
