@@ -11,7 +11,7 @@
 // watchGuardianStore.ts split.
 "use client";
 
-import { tx } from "./watchState";
+import { tx, txMany } from "./watchState";
 import {
   isBrowsablePlaylist,
   isPlaylistMutable,
@@ -19,10 +19,10 @@ import {
   nextQueueItem,
   playlistItemId,
   QUEUE_PLAYLIST_ID,
+  reorderedVideoIds,
   resolveEnsuredQueue,
   resolveEnsuredWatchLater,
   sortPlaylists,
-  swapOrder,
   WATCH_LATER_PLAYLIST_ID,
 } from "./playlistsCore";
 import type { Playlist, PlaylistItem } from "./types";
@@ -237,13 +237,23 @@ export async function clearQueue(): Promise<void> {
   }
 }
 
-/** Move a queued item one slot up or down (no-op at either end — see playlistsCore's swapOrder). */
-export async function reorderQueueItem(videoId: string, direction: "up" | "down"): Promise<void> {
-  const current = await getQueueItems();
-  const swapped = swapOrder(current, videoId, direction);
-  const changed = swapped.filter((it, i) => it.order !== current[i]?.order);
+/**
+ * Persist a full drag-and-drop reorder in ONE atomic transaction (not N individual moves): given
+ * `activeVideoId` dropped onto `overVideoId`'s position, recompute every affected item's `order`
+ * and write them all inside a single IndexedDB transaction via `txMany` — either the whole new
+ * order lands, or (on a mid-write failure) none of it does; there is no partially-applied state.
+ */
+export async function persistQueueReorder(activeVideoId: string, overVideoId: string): Promise<void> {
   try {
-    await Promise.all(changed.map((it) => tx(PLAYLIST_ITEMS_STORE, "readwrite", (s) => s.put(it))));
+    const current = await getQueueItems();
+    const newOrder = reorderedVideoIds(current, activeVideoId, overVideoId);
+    const byVideoId = new Map(current.map((it) => [it.videoId, it]));
+    await txMany(PLAYLIST_ITEMS_STORE, "readwrite", (s) => {
+      newOrder.forEach((videoId, index) => {
+        const item = byVideoId.get(videoId);
+        if (item && item.order !== index) s.put({ ...item, order: index });
+      });
+    });
   } catch {
     /* storage unavailable — degrade silently */
   }

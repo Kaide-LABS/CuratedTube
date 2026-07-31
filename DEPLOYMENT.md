@@ -75,6 +75,42 @@ requests. Widen the allowlist if anything unexpected shows up (past reports of e
 configurations — none of these are assumed present or absent without you having actually seen
 them in your own capture).
 
+### Transcripts (unofficial `timedtext` endpoint — KNOWN DEVIATION)
+
+The watch page's collapsible "Transcript" panel is fetched via YouTube's **unofficial,
+undocumented** `timedtext` endpoint (`https://www.youtube.com/api/timedtext`), not the official
+Data API and not the IFrame Player API:
+
+- The Data API's `captions.download` requires the **uploader's own OAuth token** — it structurally
+  cannot serve a third party's captions for someone else's video, so it isn't usable here.
+- The IFrame Player's caption rendering is UI-only; there's no supported way to pull raw cue text
+  out of it.
+
+**ACCEPTED RISK, same class as UULF but a step further:** `timedtext` is reverse-engineered from
+observed traffic and may change or break without notice — the same risk class as the UULF
+playlist-prefix convention (`src/lib/channels.ts`). Unlike UULF, though, this isn't a documented
+API used for its intended purpose; it's closer to pulling a page's own internal data endpoint,
+which is the same category of access this project's own compliance posture treats as
+impermissible elsewhere. **Accepted knowingly, for this one feature, on these terms:** personal,
+low-volume use (one fetch per video a user actually opens the panel for — never preemptive, never
+for a whole feed/channel), aggressively cached so the endpoint is hit as rarely as possible, and
+never redistributed. If this endpoint disappears or starts refusing Cloud Run's shared egress IP,
+the correct response is to remove the feature, not to route around whatever is blocking it.
+
+- **Server-side only.** The fetch happens in `/api/transcript` on Cloud Run, never in the browser
+  — this keeps the mechanism off the client entirely and sidesteps any client-side DNS block.
+- **Fails soft, always.** No captions is a normal `200 {available: false}` response, not an error
+  — most videos have none. A network failure, timeout (8s), or a response-shape change (the whole
+  point of Zod-validating both the XML track list and the JSON3/legacy-XML transcript bodies
+  before use) also resolves to `{available: false}` rather than throwing; the watch page can never
+  break because of this feature. See `src/lib/transcript.ts`.
+- **Cached permanently** (for the server process's lifetime), keyed by `(videoId, lang)` — see
+  `src/lib/transcriptCache.ts`, the same `globalThis`-stashed-Map pattern as `etagCache.ts`. A
+  negative (`no captions`) result is cached too, so a permanently-empty video is never re-fetched.
+  Same accepted limitation as the ETag cache: Cloud Run's `min-instances 0` can cold-start a fresh
+  process (empty cache) at any time — this is in-memory, not durable storage; a cold-start miss is
+  just a slower first hit, never wrong data.
+
 ## 3. Quota & resilience (what hardening bought)
 
 - **Conditional requests.** Every Data API read sends `If-None-Match`; an unchanged payload returns

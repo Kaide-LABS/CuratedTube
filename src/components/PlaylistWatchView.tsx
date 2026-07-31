@@ -12,6 +12,7 @@ import { getSuppressedChannels } from "@/lib/suppressedChannels";
 import { WatchPlayer } from "./WatchPlayer";
 import { VideoPreviewCard } from "./VideoPreviewCard";
 import { WatchSkeleton } from "./Skeleton";
+import { TranscriptPanel } from "./TranscriptPanel";
 
 const RosterResponseSchema = z.object({ rows: z.array(RosterRowSchema) });
 const VideosResponseSchema = z.object({ videos: z.array(VideoSchema) });
@@ -107,6 +108,7 @@ export function PlaylistWatchView({ videoId, playlistId }: { videoId: string; pl
               : "Saved to this playlist — playing from a snapshot."}
           </p>
         </div>
+        <TranscriptPanel videoId={videoId} />
         <div className="mt-4 flex items-center justify-between gap-3">
           <Link href={`/channel/${item.channelId}`} className="flex items-center gap-3 hover:opacity-90">
             <span className="text-sm font-medium text-zinc-200">{item.channelTitle}</span>

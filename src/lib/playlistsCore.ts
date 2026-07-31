@@ -67,29 +67,24 @@ export function nextOrderValue(items: Pick<PlaylistItem, "order">[]): number {
 }
 
 /**
- * Move a queued item one slot up or down by swapping its `order` with its adjacent neighbor's.
- * A no-op (returns `items` unchanged) at either end of the queue. Pure — the caller persists
- * whichever items actually changed.
+ * Compute the full reordered video-id list for a single drag-and-drop move: `activeVideoId`
+ * relocated to sit where `overVideoId` currently is, everything else shifted accordingly — the
+ * same semantics as `@dnd-kit/sortable`'s `arrayMove`, expressed purely over the domain's own
+ * `order` field so it's testable without dnd-kit or IndexedDB. Returns the CURRENT order
+ * unchanged if either id isn't found (drag onto/from something already removed).
  */
-export function swapOrder(
-  items: PlaylistItem[],
-  videoId: string,
-  direction: "up" | "down",
-): PlaylistItem[] {
-  const sorted = [...items].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  const idx = sorted.findIndex((it) => it.videoId === videoId);
-  if (idx === -1) return items;
-  const swapIdx = direction === "up" ? idx - 1 : idx + 1;
-  if (swapIdx < 0 || swapIdx >= sorted.length) return items;
-  const a = sorted[idx];
-  const b = sorted[swapIdx];
-  const aOrder = a.order;
-  const bOrder = b.order;
-  return items.map((it) => {
-    if (it.videoId === a.videoId) return { ...it, order: bOrder };
-    if (it.videoId === b.videoId) return { ...it, order: aOrder };
-    return it;
-  });
+export function reorderedVideoIds(
+  items: Pick<PlaylistItem, "videoId" | "order">[],
+  activeVideoId: string,
+  overVideoId: string,
+): string[] {
+  const sorted = [...items].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((it) => it.videoId);
+  const from = sorted.indexOf(activeVideoId);
+  const to = sorted.indexOf(overVideoId);
+  if (from === -1 || to === -1 || from === to) return sorted;
+  sorted.splice(from, 1);
+  sorted.splice(to, 0, activeVideoId);
+  return sorted;
 }
 
 /**

@@ -4,12 +4,14 @@ import {
   nextQueueItem,
   QUEUE_PLAYLIST_ID,
   QUEUE_PLAYLIST_NAME,
+  reorderedVideoIds,
   resolveEnsuredQueue,
-  swapOrder,
 } from "../src/lib/playlistsCore";
 import { decideGuardianActions } from "../src/lib/watchGuardian";
 import { mergeRosterRows } from "../src/lib/channels";
 import type { Playlist, PlaylistItem, RosterRow } from "../src/lib/types";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 function mkItem(over: Partial<PlaylistItem> & { videoId: string; order: number }): PlaylistItem {
   return {
@@ -68,35 +70,37 @@ describe("nextOrderValue — append order", () => {
   });
 });
 
-describe("swapOrder — reorder (add/append/reorder/remove/clear semantics)", () => {
+describe("reorderedVideoIds — single-drag reorder (drives the drag-and-drop queue page)", () => {
   const items = [
     mkItem({ videoId: "a", order: 0 }),
     mkItem({ videoId: "b", order: 1 }),
     mkItem({ videoId: "c", order: 2 }),
+    mkItem({ videoId: "d", order: 3 }),
+    mkItem({ videoId: "e", order: 4 }),
   ];
 
-  it("moving the middle item up swaps it with its predecessor", () => {
-    const result = swapOrder(items, "b", "up");
-    const byId = Object.fromEntries(result.map((it) => [it.videoId, it.order]));
-    expect(byId.a).toBe(1);
-    expect(byId.b).toBe(0);
-    expect(byId.c).toBe(2);
+  it("dragging item 5 to position 1 moves it to the front in ONE operation, everything else shifts down", () => {
+    const result = reorderedVideoIds(items, "e", "a");
+    expect(result).toEqual(["e", "a", "b", "c", "d"]);
   });
 
-  it("moving the middle item down swaps it with its successor", () => {
-    const result = swapOrder(items, "b", "down");
-    const byId = Object.fromEntries(result.map((it) => [it.videoId, it.order]));
-    expect(byId.a).toBe(0);
-    expect(byId.b).toBe(2);
-    expect(byId.c).toBe(1);
+  it("dragging the middle item to the end moves it past everything after it", () => {
+    const result = reorderedVideoIds(items, "c", "e");
+    expect(result).toEqual(["a", "b", "d", "e", "c"]);
   });
 
-  it("is a no-op at the top boundary", () => {
-    expect(swapOrder(items, "a", "up")).toBe(items);
+  it("is order-independent of the input array's own iteration order — sorts by `order` first", () => {
+    const shuffled = [items[4], items[1], items[3], items[0], items[2]];
+    expect(reorderedVideoIds(shuffled, "e", "a")).toEqual(["e", "a", "b", "c", "d"]);
   });
 
-  it("is a no-op at the bottom boundary", () => {
-    expect(swapOrder(items, "c", "down")).toBe(items);
+  it("dropping onto itself is a no-op", () => {
+    expect(reorderedVideoIds(items, "b", "b")).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("an unknown active or target id leaves the current order unchanged", () => {
+    expect(reorderedVideoIds(items, "unknown", "a")).toEqual(["a", "b", "c", "d", "e"]);
+    expect(reorderedVideoIds(items, "a", "unknown")).toEqual(["a", "b", "c", "d", "e"]);
   });
 });
 
@@ -134,6 +138,17 @@ describe("queue playback is NOT a cap bypass — same guardian decision function
     // WatchPlayer's mount-time capped check (shared, unmodified by the queue feature) then
     // refuses to even create the player on the next mount — see WatchPlayer.tsx's guardianReady
     // gate, reused identically by PlaylistWatchView for queue playback.
+  });
+});
+
+describe("persistQueueReorder — atomic single-transaction persistence (source guarantee)", () => {
+  it("writes the reordered queue inside ONE txMany transaction, not N individual tx() calls in a loop", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "lib", "playlists.ts"), "utf8");
+    const fnMatch = source.match(/export async function persistQueueReorder\([\s\S]*?\n\}/);
+    expect(fnMatch).not.toBeNull();
+    const body = fnMatch![0];
+    expect(body).toMatch(/txMany\(/);
+    expect(body).not.toMatch(/Promise\.all/);
   });
 });
 

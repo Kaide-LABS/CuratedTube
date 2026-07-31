@@ -16,6 +16,11 @@ HalalTube reproduces YouTube's *useful* surfaces — a discovery feed, channel p
   breaking playback. Distraction-suppressed params + an embed-restriction fallback (see
   DEPLOYMENT.md §"Self-hosted player").
 - **IndexedDB** — local watch state (single-user, no backend).
+- **Transcripts (server-side, unofficial endpoint)** — a collapsible transcript panel on the watch
+  page, fetched lazily via YouTube's undocumented `timedtext` endpoint from a Cloud Run route
+  (`/api/transcript`), never from the browser. **KNOWN DEVIATION:** this is closer to scraping
+  than an API call — accepted knowingly, for this feature only. See `src/lib/transcript.ts` and
+  DEPLOYMENT.md § "Transcripts" for the full disclosure.
 
 ## Getting started
 

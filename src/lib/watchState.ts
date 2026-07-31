@@ -103,6 +103,24 @@ export function tx<T>(
   );
 }
 
+/**
+ * Run MULTIPLE writes against `store` inside a SINGLE transaction, resolving only once the whole
+ * transaction commits — an all-or-nothing atomic batch (e.g. persisting a drag-reordered list as
+ * one write), not N independent `tx()` calls that could partially apply if one failed mid-way.
+ */
+export function txMany(store: string, mode: IDBTransactionMode, fn: (store: IDBObjectStore) => void): Promise<void> {
+  return openDB().then(
+    (db) =>
+      new Promise<void>((resolve, reject) => {
+        const transaction = db.transaction(store, mode);
+        const os = transaction.objectStore(store);
+        fn(os);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      }),
+  );
+}
+
 // --- Watch state (v1; P_seen source) --------------------------------------
 
 /** Mark a video visited (idempotent merge of watchedSec). */
