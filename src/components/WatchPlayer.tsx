@@ -194,27 +194,56 @@ export function WatchPlayer({
       if (seg) void recordActiveSegment(seg);
     };
 
+    // A video that fails to embed (owner-restricted, region/age-locked, or removed) can navigate
+    // its OWN iframe document to a different origin (an error interstitial, or about:blank) —
+    // our postMessage calls keep targeting NOCOOKIE_ORIGIN regardless, which the browser then
+    // refuses to deliver (a console "target origin does not match" notice). That mismatch must
+    // never escape as an uncaught exception: every send is wrapped, and a detached/foreign iframe
+    // node is never touched.
     const postToPlayer = (msg: unknown): void => {
-      const win = iframeRef.current?.contentWindow;
+      const iframe = iframeRef.current;
+      if (!iframe || !iframe.isConnected) return;
+      const win = iframe.contentWindow;
       if (!win) return;
       try {
         win.postMessage(JSON.stringify(msg), NOCOOKIE_ORIGIN);
       } catch {
-        /* noop — a failed postMessage just means this attempt is lost, callers retry/escalate */
+        /* noop — a failed postMessage (incl. origin mismatch) just means this attempt is lost;
+           callers retry/escalate, and the handshake timeout below catches the "never came back"
+           case rather than retrying forever against a page that will never answer. */
       }
+    };
+
+    // A restricted/unavailable video routes here — the SAME fallback UI as an explicit onError
+    // message, and the deterministic iframe removal the cap/interrupt paths already use. Guarded
+    // by `errored` so repeated triggers (multiple onError messages, a timeout firing after an
+    // error already landed) are idempotent — no repeated state churn, no re-render loop.
+    const failToEmbedFallback = (): void => {
+      stopHandshakeRetry();
+      setErrored((already) => {
+        if (!already) setPlayerMounted(false);
+        return true;
+      });
     };
 
     // The "listening" handshake — without it, the widget never posts back a single event. Sent
     // immediately and retried on an interval (the exact timing of the widget's internal readiness
     // relative to the iframe's native `load` event is not guaranteed) until we've heard ANY
-    // message back, or we give up after HANDSHAKE_MAX_ATTEMPTS.
+    // message back, or we give up after HANDSHAKE_MAX_ATTEMPTS. Giving up is distinct from an
+    // explicit onError: some restricted/removed videos never post ANY widget event at all (the
+    // iframe just shows YouTube's own static "video unavailable" placeholder) — silence for the
+    // whole retry window is itself a failure-to-load signal and must also route to the fallback,
+    // not retry forever.
     const startHandshake = (): void => {
       stopHandshakeRetry();
       let attempts = 0;
       const send = (): void => {
         attempts += 1;
         postToPlayer(buildListeningMessage(handshakeIdRef.current));
-        if (attempts >= HANDSHAKE_MAX_ATTEMPTS) stopHandshakeRetry();
+        if (attempts >= HANDSHAKE_MAX_ATTEMPTS) {
+          stopHandshakeRetry();
+          if (!handshakeAckedRef.current) failToEmbedFallback();
+        }
       };
       send();
       handshakeTimerRef.current = setInterval(send, HANDSHAKE_RETRY_MS);
@@ -369,7 +398,10 @@ export function WatchPlayer({
       }
 
       if (widgetEvent.type === "error") {
-        setErrored(true);
+        // Error info codes 2 (invalid id) / 5 (HTML5 error) / 100 (removed/private) / 101 & 150
+        // (embedding disallowed by owner) — all route to the same interception fallback; the
+        // player never distinguishes further than "this video isn't watchable here."
+        failToEmbedFallback();
         return;
       }
       if (widgetEvent.type === "stateChange") {

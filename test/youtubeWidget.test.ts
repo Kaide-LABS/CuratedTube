@@ -172,3 +172,49 @@ describe("self-hosted player — zero iframe_api / youtube.com references (sourc
     expect(body).toMatch(/pendingPauseResolveRef\.current\s*=\s*null/);
   });
 });
+
+describe("self-hosted player — embed-failure fallback (origin-mismatch / removeChild fix)", () => {
+  const source = readFileSync(join(__dirname, "..", "src", "components", "WatchPlayer.tsx"), "utf8");
+
+  it("every contentWindow.postMessage call is guarded by an isConnected check and wrapped in try/catch", () => {
+    // A restricted/removed video can navigate its OWN iframe document to a different origin —
+    // postToPlayer must never touch a detached node and must never let a send throw uncaught.
+    const postToPlayerMatch = source.match(/const postToPlayer = \(msg: unknown\): void => \{[\s\S]*?\n    \};/);
+    expect(postToPlayerMatch).not.toBeNull();
+    const body = postToPlayerMatch![0];
+    expect(body).toMatch(/iframe\.isConnected/);
+    expect(body).toMatch(/try\s*\{/);
+    expect(body).toMatch(/catch/);
+    // There is exactly one place in the component that calls contentWindow.postMessage — every
+    // handshake/command send goes through it, so this one guard covers all sends.
+    expect(source.match(/win\.postMessage\(/g)?.length ?? 0).toBe(1);
+  });
+
+  it("a handshake that never hears back (no error, no state event) routes to the SAME fallback as an explicit onError", () => {
+    // failToEmbedFallback is the single entry point for "this video failed to embed" — both the
+    // onError message handler and the handshake-timeout path must call it, not duplicate logic.
+    const calls = source.match(/failToEmbedFallback\(\)/g) ?? [];
+    // Declared, called on handshake timeout, and called on onError.
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(source).toMatch(/if \(!handshakeAckedRef\.current\) failToEmbedFallback\(\)/);
+  });
+
+  it("the fallback is idempotent — guarded so a repeated trigger doesn't re-run the unmount side effect", () => {
+    const fallbackMatch = source.match(/const failToEmbedFallback = \(\): void => \{[\s\S]*?\n    \};/);
+    expect(fallbackMatch).not.toBeNull();
+    const body = fallbackMatch![0];
+    expect(body).toMatch(/setErrored\(\(already\) => \{/);
+    expect(body).toMatch(/if \(!already\) setPlayerMounted\(false\)/);
+  });
+
+  it("no manual DOM removal anywhere in the player — the iframe has exactly one owner (React reconciliation via key={embedSrc})", () => {
+    expect(source).not.toMatch(/removeChild/);
+    expect(source).not.toMatch(/\.remove\(\)/);
+    expect(source).not.toMatch(/appendChild/);
+    expect(source).toMatch(/key=\{embedSrc\}/);
+  });
+
+  it("cap-unmount, interrupt-escalate, and error-fallback all converge on the same setPlayerMounted(false) removal path", () => {
+    expect(source.match(/setPlayerMounted\(false\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+  });
+});
