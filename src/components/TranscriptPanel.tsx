@@ -71,9 +71,37 @@ export function TranscriptPanel({ videoId }: { videoId: string }) {
         <div className="mt-3">
           {loading && <p className="text-sm text-zinc-500">Loading transcript…</p>}
 
-          {!loading && failed && <p className="text-sm text-zinc-500">Transcript unavailable.</p>}
+          {/* A transport-level failure (bad status, network error) — distinct from a CONFIRMED
+              absence: retry is offered because we genuinely don't know the answer yet. */}
+          {!loading && failed && (
+            <div>
+              <p className="text-sm text-zinc-500">Transcript temporarily unavailable — try again later.</p>
+              <button
+                type="button"
+                onClick={() => void load(lang)}
+                className="mt-2 rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
+              >
+                Retry
+              </button>
+            </div>
+          )}
 
-          {!loading && !failed && result && !result.available && (
+          {/* The server confirmed (after its own retries) that the fetch never came back
+              trustworthy — same "try again" treatment as a transport failure, NOT "no captions". */}
+          {!loading && !failed && result && !result.available && result.reason === "unavailable" && (
+            <div>
+              <p className="text-sm text-zinc-500">Transcript temporarily unavailable — try again later.</p>
+              <button
+                type="button"
+                onClick={() => void load(lang)}
+                className="mt-2 rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!loading && !failed && result && !result.available && result.reason === "no-captions" && (
             <p className="text-sm text-zinc-500">No transcript available for this video.</p>
           )}
 

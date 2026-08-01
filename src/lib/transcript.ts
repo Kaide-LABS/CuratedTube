@@ -18,6 +18,16 @@
 // response NEVER breaks the watch page — see getTranscript's catch-all below). If this endpoint
 // ever disappears or starts refusing requests, the correct response is to remove the feature, not
 // route around whatever blocks it.
+//
+// CONFIRMED DEGRADATION (2026-08-01): a direct, cache-bypassing request to this endpoint for two
+// unrelated, well-known videos that certainly have captions returned `200 OK` with an EMPTY body,
+// repeatably, from this deployment's network — shaped exactly like a silent rate-limit/throttle,
+// not a real "no captions" answer. `fast-xml-parser` parses an empty body to `{}` (no
+// `transcript_list` root at all), which — if treated the same as a genuinely empty
+// `<transcript_list></transcript_list>` — silently produces a false "no captions" result that
+// then gets cached forever (see transcriptCache.ts's bug history). The parsing below therefore
+// distinguishes "root present, confirmed zero tracks" from "root missing/malformed" explicitly,
+// and getTranscript retries a few times before treating the latter as a (never-cached) failure.
 import "server-only";
 import { z } from "zod";
 import { XMLParser } from "fast-xml-parser";
@@ -38,27 +48,50 @@ export type TranscriptCue = {
 };
 
 export type TranscriptResult =
-  | { available: false }
+  // Confirmed: the track-list endpoint returned a well-formed, empty list — this video really
+  // has no captions (common; not an error).
+  | { available: false; reason: "no-captions" }
+  // NOT confirmed: the fetch failed, timed out, or came back malformed/empty after retries — we
+  // genuinely don't know whether this video has captions. Must be shown differently in the UI
+  // and must NEVER be cached as a negative (see transcriptCache.ts).
+  | { available: false; reason: "unavailable" }
   | { available: true; languageCode: string; tracks: TranscriptTrack[]; cues: TranscriptCue[] };
 
 // --- Pure parsing (unit-testable without any network — fed the parser's own output) ----------
 
+// `transcript_list` is either an object with an optional `track` child, OR the bare empty string
+// fast-xml-parser produces for a childless `<transcript_list></transcript_list>` element — BOTH
+// mean "the root is genuinely present", which is the signal that distinguishes a confirmed-empty
+// list from a malformed/blank response (no `transcript_list` key at all).
 const TrackListXmlSchema = z.object({
   transcript_list: z
-    .object({
-      track: z.union([z.record(z.string(), z.unknown()), z.array(z.record(z.string(), z.unknown()))]).optional(),
-    })
+    .union([
+      z.object({ track: z.union([z.record(z.string(), z.unknown()), z.array(z.record(z.string(), z.unknown()))]).optional() }),
+      z.string(),
+    ])
     .optional(),
 });
 
-/** Parse the `type=list` track-list XML (already run through fast-xml-parser) into tracks. */
-export function parseTrackListXml(parsed: unknown): TranscriptTrack[] {
+export type TrackListParseResult =
+  | { rootPresent: true; tracks: TranscriptTrack[] }
+  | { rootPresent: false };
+
+/**
+ * Parse the `type=list` track-list XML (already run through fast-xml-parser). `rootPresent:
+ * false` means the response didn't even contain a `transcript_list` root — a malformed or empty
+ * body, NOT evidence the video lacks captions (see the module header's confirmed-degradation
+ * note). Only `rootPresent: true` is a real answer, whether or not it holds any tracks.
+ */
+export function parseTrackListXml(parsed: unknown): TrackListParseResult {
   const result = TrackListXmlSchema.safeParse(parsed);
-  if (!result.success) return [];
-  const raw = result.data.transcript_list?.track;
-  if (!raw) return [];
+  if (!result.success) return { rootPresent: false };
+  const root = result.data.transcript_list;
+  if (root === undefined) return { rootPresent: false };
+  if (typeof root === "string") return { rootPresent: true, tracks: [] };
+  const raw = root.track;
+  if (!raw) return { rootPresent: true, tracks: [] };
   const rows = Array.isArray(raw) ? raw : [raw];
-  return rows
+  const tracks = rows
     .map((row) => {
       const langCode = row["@_lang_code"];
       if (typeof langCode !== "string" || !langCode) return null;
@@ -70,6 +103,7 @@ export function parseTrackListXml(parsed: unknown): TranscriptTrack[] {
       } satisfies TranscriptTrack;
     })
     .filter((t): t is TranscriptTrack => t !== null);
+  return { rootPresent: true, tracks };
 }
 
 const Json3Schema = z.object({
@@ -130,19 +164,31 @@ export function parseLegacyXmlCues(parsed: unknown): TranscriptCue[] {
     .filter((c): c is TranscriptCue => c !== null);
 }
 
-/** Pick the track to serve: the requested language if present, else the default/first track. */
+/**
+ * Pick the track to serve. A MANUAL (non-`asr`) track is always preferred over an auto-generated
+ * one for the same language — auto-generated is the fallback, never the default, when both
+ * exist. Requested language takes priority over the list's own ordering; with no match (or no
+ * language requested), falls back to the first manual track overall, then the first ASR track —
+ * ASR tracks are never filtered out entirely, since most spoken-word videos only have those.
+ */
 export function pickTrack(tracks: TranscriptTrack[], requestedLang?: string): TranscriptTrack | null {
   if (tracks.length === 0) return null;
+  const manual = tracks.filter((t) => !t.isAutoGenerated);
+  const asr = tracks.filter((t) => t.isAutoGenerated);
   if (requestedLang) {
-    const match = tracks.find((t) => t.languageCode === requestedLang);
-    if (match) return match;
+    const manualMatch = manual.find((t) => t.languageCode === requestedLang);
+    if (manualMatch) return manualMatch;
+    const asrMatch = asr.find((t) => t.languageCode === requestedLang);
+    if (asrMatch) return asrMatch;
   }
-  return tracks[0];
+  return manual[0] ?? asr[0] ?? null;
 }
 
 // --- I/O orchestration (server-only fetches, NOT covered by unit tests — the parsing above is) --
 
 const FETCH_TIMEOUT_MS = 8000;
+const MAX_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [300, 800];
 
 async function fetchWithTimeout(url: string): Promise<Response | null> {
   const controller = new AbortController();
@@ -157,47 +203,70 @@ async function fetchWithTimeout(url: string): Promise<Response | null> {
   }
 }
 
-/**
- * Fetch a video's transcript for `lang` (or its default track if omitted). NO CAPTIONS AVAILABLE
- * is a normal, expected outcome (`{available: false}`) — most videos have none, and that is not
- * an error. Any network failure, timeout, or response-shape change also fails soft to
- * `{available: false}` rather than throwing — the watch page must never break because of this.
- */
-export async function getTranscript(videoId: string, lang?: string): Promise<TranscriptResult> {
-  try {
-    const listRes = await fetchWithTimeout(
-      `${TIMEDTEXT_BASE}?type=list&v=${encodeURIComponent(videoId)}`,
-    );
-    if (!listRes) return { available: false };
-    const listXml = await listRes.text();
-    const tracks = parseTrackListXml(xmlParser.parse(listXml));
-    const track = pickTrack(tracks, lang);
-    if (!track) return { available: false };
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+/** Fetch the track list, retrying a few times if the response is malformed/empty (a confirmed
+ * degradation pattern from this endpoint — see the module header) — but NOT retrying a
+ * genuinely-empty, well-formed list, since that's a real answer the first time. */
+async function fetchTrackListWithRetry(videoId: string): Promise<TrackListParseResult> {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const res = await fetchWithTimeout(`${TIMEDTEXT_BASE}?type=list&v=${encodeURIComponent(videoId)}`);
+    if (res) {
+      const parsed = parseTrackListXml(xmlParser.parse(await res.text()));
+      if (parsed.rootPresent) return parsed;
+    }
+    if (attempt < MAX_ATTEMPTS) await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? RETRY_BACKOFF_MS.at(-1)!);
+  }
+  return { rootPresent: false };
+}
+
+/** Fetch a track's cue body, preferring json3 then falling back to legacy XML, retrying the pair
+ * a few times before giving up — same rationale as the track-list retry above. */
+async function fetchCuesWithRetry(videoId: string, languageCode: string): Promise<TranscriptCue[] | null> {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const json3Res = await fetchWithTimeout(
-      `${TIMEDTEXT_BASE}?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(track.languageCode)}&fmt=json3`,
+      `${TIMEDTEXT_BASE}?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(languageCode)}&fmt=json3`,
     );
     if (json3Res) {
-      const body = await json3Res.text();
       try {
-        const cues = parseJson3Cues(JSON.parse(body));
-        if (cues.length > 0) {
-          return { available: true, languageCode: track.languageCode, tracks, cues };
-        }
+        const cues = parseJson3Cues(JSON.parse(await json3Res.text()));
+        if (cues.length > 0) return cues;
       } catch {
         /* malformed json3 — fall through to the legacy XML format below */
       }
     }
-
     const legacyRes = await fetchWithTimeout(
-      `${TIMEDTEXT_BASE}?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(track.languageCode)}`,
+      `${TIMEDTEXT_BASE}?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(languageCode)}`,
     );
-    if (!legacyRes) return { available: false };
-    const legacyXml = await legacyRes.text();
-    const cues = parseLegacyXmlCues(xmlParser.parse(legacyXml));
-    if (cues.length === 0) return { available: false };
-    return { available: true, languageCode: track.languageCode, tracks, cues };
+    if (legacyRes) {
+      const cues = parseLegacyXmlCues(xmlParser.parse(await legacyRes.text()));
+      if (cues.length > 0) return cues;
+    }
+    if (attempt < MAX_ATTEMPTS) await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? RETRY_BACKOFF_MS.at(-1)!);
+  }
+  return null; // a track is KNOWN to exist (we got a track list) but its body never came back
+}
+
+/**
+ * Fetch a video's transcript for `lang` (or its default/preferred track if omitted).
+ * `{available: false, reason: "no-captions"}` is a normal, expected, CONFIRMED outcome — most
+ * videos genuinely have none. `{available: false, reason: "unavailable"}` means we could not get
+ * a trustworthy answer (fetch failure, timeout, or a malformed response surviving every retry) —
+ * distinct on purpose, and the caller (the API route) must never cache this one.
+ */
+export async function getTranscript(videoId: string, lang?: string): Promise<TranscriptResult> {
+  try {
+    const listResult = await fetchTrackListWithRetry(videoId);
+    if (!listResult.rootPresent) return { available: false, reason: "unavailable" };
+    const track = pickTrack(listResult.tracks, lang);
+    if (!track) return { available: false, reason: "no-captions" };
+
+    const cues = await fetchCuesWithRetry(videoId, track.languageCode);
+    if (cues === null) return { available: false, reason: "unavailable" };
+    return { available: true, languageCode: track.languageCode, tracks: listResult.tracks, cues };
   } catch {
-    return { available: false };
+    return { available: false, reason: "unavailable" };
   }
 }

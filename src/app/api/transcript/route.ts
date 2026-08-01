@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getTranscript } from "@/lib/transcript";
-import { getCachedTranscript, setCachedTranscript, transcriptCacheKey } from "@/lib/transcriptCache";
+import {
+  bustCachedTranscript,
+  getCachedTranscript,
+  setCachedTranscript,
+  transcriptCacheKey,
+} from "@/lib/transcriptCache";
 
 export const dynamic = "force-dynamic";
 
@@ -35,8 +40,27 @@ export async function GET(req: Request): Promise<NextResponse> {
   if (cached) return NextResponse.json(cached);
 
   // Fail-soft is baked into getTranscript itself (network/timeout/shape-change -> {available:
-  // false}), so this route never needs its own try/catch to stay up.
+  // false, reason: "unavailable"}), so this route never needs its own try/catch to stay up.
+  // setCachedTranscript refuses to persist an "unavailable" result on its own (see
+  // transcriptCache.ts) — this call site doesn't need to special-case it either.
   const result = await getTranscript(videoId, lang);
   setCachedTranscript(key, result);
   return NextResponse.json(result);
+}
+
+/**
+ * DELETE /api/transcript?videoId=...&lang=... — manual cache-bust for one (videoId, lang) entry.
+ * Internal/support use (e.g. re-testing a video after a fix landed), not wired to any UI button.
+ */
+export async function DELETE(req: Request): Promise<NextResponse> {
+  const url = new URL(req.url);
+  const parsed = QuerySchema.safeParse({
+    videoId: url.searchParams.get("videoId") ?? "",
+    lang: url.searchParams.get("lang") ?? undefined,
+  });
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+  }
+  bustCachedTranscript(transcriptCacheKey(parsed.data.videoId, parsed.data.lang));
+  return NextResponse.json({ busted: true });
 }
